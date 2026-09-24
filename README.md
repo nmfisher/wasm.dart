@@ -56,15 +56,15 @@ __Legend__:
 | stringCodeUnitAt                         | ✅          | 🎯        |                               |
 | stringIndexOfString                      | ✅          | 🎯        |                               |
 | stringLastIndexOfString                  | ✅          | 🎯        |                               |
-| stringReplaceAllString                   |             | 🎯        |                               |
+| stringReplaceAllString                   | ✅          | 🎯        |                               |
 | stringReplaceAllRegExp                   |             | 🎯        |                               |
 | stringSubstring                          | ✅          | 🎯        |                               |
 | stringToLowerCase                        | ✅          | 🎯        |                               |
 | stringToUpperCase                        | ✅          | 🎯        |                               |
 | stringConcat                             | ✅          | 🎯        |                               |
 | stringRepeat                             | ✅          | 🎯        |                               |
-| stringReplaceRange                       |             | 🎯        |                               |
-| stringToCodeUnits                        |             | 🎯        |                               |
+| stringReplaceRange                       | ✅          | 🎯        |                               |
+| stringToCodeUnits                        | ✅          | 🎯        |                               |
 | monotonicClockFrequency                  | ✅          | 📦        |                               |
 | monotonicClockTicks                      | ✅          | 📦        |                               |
 | weakRefCreate                            |             | 🛑        |                               |
@@ -79,9 +79,9 @@ __Legend__:
 | isWindows                                |             | 📦        |                               |
 | stackTraceGetCurrent                     | ✅          | 🛑        | Impossible, stub used         |
 | stackTraceToString                       | ✅          | 🛑        | Impossible, stub used         |
-| doubleTryParse                           |             | 🎯        |                               |
-| tryParseResultGetDouble                  |             | 🎯        |                               |
-| doubleParseInfallible                    |             | 🎯        |                               |
+| doubleTryParse                           | ✅          | 🎯        |                               |
+| tryParseResultGetDouble                  | ✅          | 🎯        |                               |
+| doubleParseInfallible                    | ✅          | 🎯        |                               |
 | i64ToString                              | ✅          | 🎯        | Needs optimization for base10 |
 | f64ToExponential                         | ✅          | 🎯        |                               |
 | f64ToExponentialWithFractionDigits       | ✅          | 🎯        |                               |
@@ -120,7 +120,7 @@ __Legend__:
 | randomInt                                | ✅          | 📦        |                               |
 | randomIntSecure                          | ✅          | 📦        |                               |
 | print                                    |             | 📦        | Currently a stub              |
-| jsonEncodeString                         |             | 🎯        | Currently a stub              |
+| jsonEncodeString                         | ✅          | 🎯        | Currently a stub              |
 | debugger                                 |             | 🛑        |                               |
 | inspect                                  |             | 🛑        |                               |
 | dartTimelineStreamEnabled                |             | 🛑        |                               |
