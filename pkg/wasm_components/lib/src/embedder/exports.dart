@@ -206,6 +206,20 @@ WasmExternRef? stringRepeat(WasmExternRef? string, WasmI32 amount) {
 }
 
 @pragma('wasm:export')
+WasmExternRef? stringReplaceAllString(
+  WasmExternRef? string,
+  WasmExternRef? needle,
+  WasmExternRef? replacement,
+) {
+  return WasmStringImplementation.fromExtern(string)
+      .replaceAllString(
+        WasmStringImplementation.fromExtern(needle),
+        WasmStringImplementation.fromExtern(replacement),
+      )
+      .externalize();
+}
+
+@pragma('wasm:export')
 WasmExternRef? stringReplaceRange(
   WasmExternRef? string,
   WasmI32 start,
