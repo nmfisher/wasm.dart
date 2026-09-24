@@ -10,6 +10,7 @@ import '../runtime/async/task.dart';
 import 'clock.dart';
 import 'constants.dart';
 import 'double_format.dart';
+import 'double_parse.dart';
 import 'number_format.dart';
 import 'stack_trace.dart';
 import 'string.dart';
@@ -120,6 +121,40 @@ WasmExternRef f64ToPrecision(WasmF64 value, WasmI32 digits) {
 @pragma('wasm:export')
 WasmExternRef f64ToFixed(WasmF64 value, WasmI32 digits) {
   return doubleToFixed(value.toDouble(), digits.toIntSigned()).externalize();
+}
+
+final class _DoubleTryParseResult {
+  final double value;
+
+  _DoubleTryParseResult(this.value);
+}
+
+@pragma('wasm:export')
+WasmExternRef? doubleTryParse(WasmExternRef? string) {
+  final result = tryParseDouble(WasmStringImplementation.fromExtern(string));
+  if (result is DoubleParseSuccess) {
+    return WasmAnyRef.fromObject(_DoubleTryParseResult(result.value))
+        .externalize();
+  }
+  return WasmExternRef.nullRef;
+}
+
+@pragma('wasm:export')
+WasmF64 tryParseResultGetDouble(WasmExternRef? parseResult) {
+  final result =
+      parseResult!.internalize().toObject() as _DoubleTryParseResult;
+  return WasmF64.fromDouble(result.value);
+}
+
+@pragma('wasm:export')
+WasmF64 doubleParseInfallible(WasmExternRef? string) {
+  final result = tryParseDouble(WasmStringImplementation.fromExtern(string));
+  if (result is DoubleParseSuccess) {
+    return WasmF64.fromDouble(result.value);
+  }
+  // The SDK only calls this on strings it has already validated (e.g. JSON
+  // number tokens). Returning zero keeps a bad call non-fatal.
+  return const WasmF64(0.0);
 }
 
 @pragma('wasm:export')
