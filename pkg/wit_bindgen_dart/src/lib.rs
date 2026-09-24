@@ -382,6 +382,24 @@ interface greeting {
     }
 
     #[test]
+    fn int_cast() {
+        print_definitions(
+            "
+package docs:adder@0.1.0;
+
+interface add {
+    add: func(x: u32, y: u32) -> u32;
+}
+
+world root {
+    export add;
+}
+",
+        )
+        .expect("Could not generate definitions")
+    }
+
+    #[test]
     fn wasi_cli() {
         let options = GenerateDartOptions {
             files: vec![InputFile {

@@ -17,18 +17,28 @@ import 'compiler.dart';
 final class ModuleTransformer {
   final w.Module module;
   final Logger logger;
+  final bool implicitWasiDependencies;
   final Map<w.ImportedFunction, w.BaseFunction> _patchFunctions = {};
 
   late final Map<String, w.Export> _exports = {
     for (final export in module.exports.exported) export.name: export,
   };
 
-  ModuleTransformer(this.module, this.logger);
+  ModuleTransformer(
+    this.module,
+    this.logger, {
+    required this.implicitWasiDependencies,
+  });
 
-  factory ModuleTransformer.fromBytes(Uint8List moduleBytes, Logger logger) {
+  factory ModuleTransformer.fromBytes(
+    Uint8List moduleBytes,
+    Logger logger, {
+    required bool implicitWasiDependencies,
+  }) {
     return ModuleTransformer(
       w.Module.deserialize(w.Deserializer(moduleBytes)),
       logger,
+      implicitWasiDependencies: implicitWasiDependencies,
     );
   }
 
@@ -69,18 +79,15 @@ final class ModuleTransformer {
     for (final import in module.imports.all.toList()) {
       if (import is w.ImportedFunction && import.module == 'dart') {
         if (replacers[import.name] case final replacer?) {
-          replacer.addTo(abi, this, import);
-          continue;
-        } else if (_exports[import.name] case final export?) {
+          if (replacer.addTo(abi, this, import)) {
+            continue;
+          }
+        }
+
+        if (_exports[import.name] case final export?) {
           if (export case w.FunctionExport(
             function: final w.DefinedFunction fn,
           )) {
-            if (fn.type != import.type) {
-              throw StateError(
-                'Could not link ${import.name} due to different types.',
-              );
-            }
-
             _patchFunctions[import] = fn;
             continue;
           }
@@ -289,7 +296,7 @@ const _rewriteToRuntimeImports = {
 abstract base class _ComponentImport {
   const _ComponentImport();
 
-  void addTo(
+  bool addTo(
     ProgramAbi abi,
     ModuleTransformer transformer,
     w.ImportedFunction function,
@@ -300,11 +307,13 @@ final class _RandomImports extends _ComponentImport {
   const _RandomImports();
 
   @override
-  void addTo(
+  bool addTo(
     ProgramAbi abi,
     ModuleTransformer transformer,
     w.ImportedFunction function,
   ) {
+    if (!transformer.implicitWasiDependencies) return false;
+
     final isSecure = function.name == 'randomIntSecure';
     final interface = isSecure
         ? _lookupSecureRandom(abi)
@@ -331,6 +340,7 @@ final class _RandomImports extends _ComponentImport {
       ),
     );
     transformer._patchFunctions[function] = import;
+    return true;
   }
 
   AbiInterface _lookupInsecureRandom(ProgramAbi abi) {
@@ -374,11 +384,13 @@ final class _ClockImports extends _ComponentImport {
   const _ClockImports();
 
   @override
-  void addTo(
+  bool addTo(
     ProgramAbi abi,
     ModuleTransformer transformer,
     w.ImportedFunction function,
   ) {
+    // TODO: Respect transformer.implicitWasiDependencies
+
     switch (function.name) {
       case 'wasi_now':
         if (!_functionUsed(transformer, 'currentTime')) {
@@ -462,6 +474,8 @@ final class _ClockImports extends _ComponentImport {
           ),
         );
     }
+
+    return true;
   }
 
   bool _functionUsed(ModuleTransformer transformer, String name) {

@@ -13,11 +13,13 @@ final class CompilerOptions {
   final File input;
   final File output;
   final bool hooksIncludeDevDependencies;
+  final bool implicitWasiDependencies;
 
   CompilerOptions(
     this.input,
     this.output, {
     this.hooksIncludeDevDependencies = false,
+    this.implicitWasiDependencies = true,
   });
 }
 
@@ -86,6 +88,7 @@ final class ComponentCompiler {
       final transformer = ModuleTransformer.fromBytes(
         await File(dart2wasmOut).readAsBytes(),
         logger,
+        implicitWasiDependencies: options.implicitWasiDependencies,
       );
       transformer.transform(abi);
 

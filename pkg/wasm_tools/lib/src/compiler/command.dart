@@ -21,6 +21,12 @@ final class CompileCommand extends Command<void> {
       hide: true,
       defaultsTo: false,
     );
+
+    argParser.addFlag(
+      'implicit-wasi-imports',
+      defaultsTo: true,
+      help: 'Add implicit wasi imports for randomness when required by Dart',
+    );
   }
 
   @override
@@ -48,6 +54,7 @@ final class CompileCommand extends Command<void> {
         hooksIncludeDevDependencies: argResults.flag(
           'hooks-include-dev-dependencies',
         ),
+        implicitWasiDependencies: argResults.flag('implicit-wasi-imports'),
       ),
       _logger,
     );
