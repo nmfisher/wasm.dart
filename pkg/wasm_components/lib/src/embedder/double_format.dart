@@ -237,10 +237,14 @@ _Digits _shortestDigits(double value) {
 /// Parses `0.digits * 10^(exponent + count)` back into a double with
 /// correct rounding (ties to even), using exact [BigInt] arithmetic.
 double _digitsToDouble(_Digits digits) {
-  // value = mantissa * 10^shift, as an exact fraction.
   final mantissa = _bigFromDecimalDigits(digits.digits);
-  final shift = digits.exponent;
+  return decimalFractionToDouble(mantissa, digits.exponent);
+}
 
+/// Converts `mantissa * 10^shift` (mantissa >= 0) into the nearest double,
+/// with ties to even - the same algorithm [double.parse] needs. Public
+/// because the double *parser* in `double_parse.dart` shares it.
+double decimalFractionToDouble(BigInt mantissa, int shift) {
   var numerator = mantissa;
   var denominator = BigInt.one;
   if (shift >= 0) {
@@ -275,6 +279,10 @@ double _digitsToDouble(_Digits digits) {
     // Normal: m is the 53-bit significand of
     // value = m * 2^(length - 53 - 1074) = 1.f * 2^(length - 1075).
     final biased = length - 1075 + 1023;
+    if (biased >= 0x7ff) {
+      // Overflow: the value is larger than the largest finite double.
+      return double.infinity;
+    }
     return _bitsToDouble(
       (biased << 52) | _bigToInt(m - (BigInt.one << 52)),
     );
