@@ -43,12 +43,12 @@ __Legend__:
 
 | Method                                   | Implemented | Category | Notes                         |
 |------------------------------------------|-------------|----------|-------------------------------|
-| scheduleOnce                             | ✅          | 📦        |                               |
-| scheduleRepeated                         | ✅          | 📦        |                               |
+| scheduleOnce                             |             | 📦        |                               |
+| scheduleRepeated                         |             | 📦        |                               |
 | queueMicrotask                           | ✅          | 🎯        |                               |
-| clearSchedule                            | ✅          | 📦        |                               |
+| clearSchedule                            |             | 📦        |                               |
 | currentTimeMicros                        | ✅          | 📦        |                               |
-| stringFromCharCodeArray                  |             | 🎯        |                               |
+| stringFromCharCodeArray                  | ✅          | 🎯        |                               |
 | stringFromAsciiBytes                     | ✅          | 🎯        |                               |
 | stringLength                             | ✅          | 🎯        |                               |
 | stringEquals                             | ✅          | 🎯        |                               |
@@ -83,11 +83,11 @@ __Legend__:
 | tryParseResultGetDouble                  |             | 🎯        |                               |
 | doubleParseInfallible                    |             | 🎯        |                               |
 | i64ToString                              | ✅          | 🎯        | Needs optimization for base10 |
-| f64ToExponential                         |             | 🎯        |                               |
-| f64ToExponentialWithFractionDigits       |             | 🎯        |                               |
-| f64ToPrecision                           |             | 🎯        |                               |
-| f64ToFixed                               |             | 🎯        |                               |
-| f64ToString                              |             | 🎯        | Currently a stub              |
+| f64ToExponential                         | ✅          | 🎯        |                               |
+| f64ToExponentialWithFractionDigits       | ✅          | 🎯        |                               |
+| f64ToPrecision                           | ✅          | 🎯        |                               |
+| f64ToFixed                               | ✅          | 🎯        |                               |
+| f64ToString                              | ✅          | 🎯        |                               |
 | stringBufferCreate                       | ✅          | 🎯        |                               |
 | stringBufferWriteString                  | ✅          | 🎯        |                               |
 | stringBufferWriteCharCode                | ✅          | 🎯        |                               |
