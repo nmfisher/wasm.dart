@@ -93,6 +93,116 @@ sealed class WasmStringImplementation {
     return -1;
   }
 
+  /// Code units of this string written into [outArray] starting at
+  /// [startIndex] (the `dart.stringToCodeUnits` import contract).
+  void writeToCodeUnits(WasmArray<WasmI16> outArray, int startIndex) {
+    for (var i = 0; i < length; i++) {
+      outArray.write(startIndex + i, codeUnitAtUnchecked(i));
+    }
+  }
+
+  /// Replaces every occurrence of [needle] with [replacement]
+  /// (`dart.stringReplaceAllString`). The SDK only calls this with a
+  /// non-empty [needle]; the empty-needle case is handled on its side.
+  WasmStringImplementation replaceAllString(
+    WasmStringImplementation needle,
+    WasmStringImplementation replacement,
+  ) {
+    final needleLength = needle.length;
+    assert(needleLength > 0);
+    final replacementLength = replacement.length;
+    final thisLength = length;
+
+    // Count matches to size the result precisely.
+    var matches = 0;
+    for (var i = 0; i + needleLength <= thisLength;) {
+      var match = true;
+      for (var j = 0; j < needleLength; j++) {
+        if (codeUnitAtUnchecked(i + j) != needle.codeUnitAtUnchecked(j)) {
+          match = false;
+          break;
+        }
+      }
+      if (match) {
+        matches++;
+        i += needleLength;
+      } else {
+        i++;
+      }
+    }
+    if (matches == 0) return this;
+
+    final resultLength =
+        thisLength - matches * (needleLength - replacementLength);
+    if (this is Latin1String &&
+        needle is Latin1String &&
+        replacement is Latin1String) {
+      final thisLatin = this as Latin1String;
+      return Latin1String.unsafeWrap(
+        _replaceAllInPlace(
+          thisLatin.codeUnits,
+          needle.codeUnits,
+          replacement.codeUnits,
+          matches,
+          resultLength,
+        ),
+      );
+    }
+    final result = WasmArray<WasmI16>(resultLength);
+    var offset = 0;
+    for (var i = 0; i < thisLength;) {
+      var match = i + needleLength <= thisLength;
+      for (var j = 0; match && j < needleLength; j++) {
+        if (codeUnitAtUnchecked(i + j) != needle.codeUnitAtUnchecked(j)) {
+          match = false;
+        }
+      }
+      if (match) {
+        for (var j = 0; j < replacementLength; j++) {
+          result.write(offset + j, replacement.codeUnitAtUnchecked(j));
+        }
+        offset += replacementLength;
+        i += needleLength;
+      } else {
+        result.write(offset++, codeUnitAtUnchecked(i++));
+      }
+    }
+    return Utf16String.unsafeWrap(result);
+  }
+
+  /// Latin-1 fast path for [replaceAllString]: single-byte copies.
+  static WasmArray<WasmI8> _replaceAllInPlace(
+    WasmArray<WasmI8> source,
+    WasmArray<WasmI8> needle,
+    WasmArray<WasmI8> replacement,
+    int matches,
+    int resultLength,
+  ) {
+    final needleLength = needle.length;
+    final replacementLength = replacement.length;
+    final thisLength = source.length;
+    final result = WasmArray<WasmI8>(resultLength);
+    var offset = 0;
+    for (var i = 0; i < thisLength;) {
+      var match = i + needleLength <= thisLength;
+      for (var j = 0; match && j < needleLength; j++) {
+        if (source.readUnsigned(i + j) != needle.readUnsigned(j)) {
+          match = false;
+        }
+      }
+      if (match) {
+        for (var j = 0; j < replacementLength; j++) {
+          result.write(offset + j, replacement.readUnsigned(j));
+        }
+        offset += replacementLength;
+        i += needleLength;
+      } else {
+        result.write(offset++, source.readUnsigned(i++));
+      }
+    }
+    return result;
+  }
+
   static WasmStringImplementation fromExtern(WasmExternRef? ref) {
     return ref!.internalize().toObject() as WasmStringImplementation;
   }
