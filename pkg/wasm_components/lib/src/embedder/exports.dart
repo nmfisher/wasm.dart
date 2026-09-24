@@ -206,6 +206,49 @@ WasmExternRef? stringRepeat(WasmExternRef? string, WasmI32 amount) {
 }
 
 @pragma('wasm:export')
+WasmExternRef? stringReplaceAllString(
+  WasmExternRef? string,
+  WasmExternRef? needle,
+  WasmExternRef? replacement,
+) {
+  return WasmStringImplementation.fromExtern(string)
+      .replaceAllString(
+        WasmStringImplementation.fromExtern(needle),
+        WasmStringImplementation.fromExtern(replacement),
+      )
+      .externalize();
+}
+
+@pragma('wasm:export')
+WasmExternRef? stringReplaceRange(
+  WasmExternRef? string,
+  WasmI32 start,
+  WasmI32 end,
+  WasmExternRef? replacement,
+) {
+  final wasmString = WasmStringImplementation.fromExtern(string);
+  final part = WasmStringImplementation.fromExtern(replacement);
+  return wasmString
+      .substring(const WasmI32(0), start)
+      .concat(part)
+      .concat(wasmString.substring(end, WasmI32.fromInt(wasmString.length)))
+      .externalize();
+}
+
+@pragma('wasm:export')
+WasmVoid stringToCodeUnits(
+  WasmExternRef? string,
+  WasmArray<WasmI16> outArray,
+  WasmI32 startIndex,
+) {
+  WasmStringImplementation.fromExtern(string).writeToCodeUnits(
+    outArray,
+    startIndex.toIntUnsigned(),
+  );
+  return WasmVoid();
+}
+
+@pragma('wasm:export')
 WasmExternRef stringBufferCreate() {
   return WasmStringBuffer().externalize();
 }
