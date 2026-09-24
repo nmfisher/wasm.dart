@@ -9,6 +9,7 @@ import 'dart:_wasm';
 import '../runtime/async/task.dart';
 import 'clock.dart';
 import 'constants.dart';
+import 'double_format.dart';
 import 'number_format.dart';
 import 'stack_trace.dart';
 import 'string.dart';
@@ -93,7 +94,32 @@ WasmExternRef i64ToString(WasmI64 value, WasmI32 radix) {
 
 @pragma('wasm:export')
 WasmExternRef f64ToString(WasmF64 value) {
-  throw UnimplementedError('f64ToString');
+  return doubleToString(value.toDouble()).externalize();
+}
+
+@pragma('wasm:export')
+WasmExternRef f64ToExponential(WasmF64 value) {
+  return doubleToExponentialWithFractionDigits(value.toDouble(), -1)
+      .externalize();
+}
+
+@pragma('wasm:export')
+WasmExternRef f64ToExponentialWithFractionDigits(WasmF64 value, WasmI32 digits) {
+  return doubleToExponentialWithFractionDigits(
+    value.toDouble(),
+    digits.toIntSigned(),
+  ).externalize();
+}
+
+@pragma('wasm:export')
+WasmExternRef f64ToPrecision(WasmF64 value, WasmI32 digits) {
+  return doubleToPrecision(value.toDouble(), digits.toIntSigned())
+      .externalize();
+}
+
+@pragma('wasm:export')
+WasmExternRef f64ToFixed(WasmF64 value, WasmI32 digits) {
+  return doubleToFixed(value.toDouble(), digits.toIntSigned()).externalize();
 }
 
 @pragma('wasm:export')
