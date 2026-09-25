@@ -217,6 +217,17 @@ sealed class WasmStringImplementation {
     return buffer.toString();
   }
 
+  /// Wraps a plain Dart string as a UTF-16 string (the inverse of
+  /// [toDartString]; used for values that cross the wasm boundary, e.g.
+  /// regexp compile-error messages).
+  static WasmStringImplementation fromDartString(String source) {
+    final units = WasmArray<WasmI16>(source.length);
+    for (var i = 0; i < source.length; i++) {
+      units.write(i, source.codeUnitAt(i));
+    }
+    return Utf16String.unsafeWrap(units);
+  }
+
   static WasmStringImplementation _concatUtf16(
     WasmStringImplementation a,
     WasmStringImplementation b,
