@@ -1,129 +1,211 @@
 {
-  "type_defs": [],
-  "interfaces": [
-    {
-      "full_name": "wasmdart:tests/result-collector",
-      "exported_functions": {
-        "record-string": {
-          "name": "record-string",
-          "kind": "freestanding",
-          "params": [
-            {
-              "name": "e",
-              "type": "string"
-            }
-          ]
-        },
-        "record-double": {
-          "name": "record-double",
-          "kind": "freestanding",
-          "params": [
-            {
-              "name": "e",
-              "type": "f64"
-            }
-          ]
-        },
-        "record-int": {
-          "name": "record-int",
-          "kind": "freestanding",
-          "params": [
-            {
-              "name": "e",
-              "type": "s64"
-            }
-          ]
-        },
-        "record-bool": {
-          "name": "record-bool",
-          "kind": "freestanding",
-          "params": [
-            {
-              "name": "e",
-              "type": "bool"
-            }
-          ]
-        }
-      }
-    },
-    {
-      "full_name": "wasmdart:tests/tested-module",
-      "exported_functions": {
-        "count-tests": {
-          "name": "count-tests",
-          "kind": "freestanding",
-          "params": [],
-          "result": "u32"
-        },
-        "invoke-test": {
-          "name": "invoke-test",
-          "kind": "freestanding",
-          "params": [
-            {
-              "name": "number",
-              "type": "u32"
-            }
-          ]
-        }
-      }
-    }
-  ],
   "imports": [
     {
-      "interface_id": 0,
-      "function_name": "record-string",
-      "core_name": "_import0",
-      "options": {
-        "use_memory": true,
-        "uses_strings": true
+      "import_name": "_import0",
+      "definition": {
+        "Instance": {
+          "interface": 0,
+          "function_name": "record-string"
+        }
+      },
+      "lower_options": {
+        "uses_memory": true,
+        "uses_strings": true,
+        "uses_realloc": false,
+        "is_async": false,
+        "uses_callback": false
       }
     },
     {
-      "interface_id": 0,
-      "function_name": "record-double",
-      "core_name": "_import1",
-      "options": {
-        "use_memory": false,
-        "uses_strings": false
+      "import_name": "_import1",
+      "definition": {
+        "Instance": {
+          "interface": 0,
+          "function_name": "record-double"
+        }
+      },
+      "lower_options": {
+        "uses_memory": false,
+        "uses_strings": false,
+        "uses_realloc": false,
+        "is_async": false,
+        "uses_callback": false
       }
     },
     {
-      "interface_id": 0,
-      "function_name": "record-int",
-      "core_name": "_import2",
-      "options": {
-        "use_memory": false,
-        "uses_strings": false
+      "import_name": "_import2",
+      "definition": {
+        "Instance": {
+          "interface": 0,
+          "function_name": "record-int"
+        }
+      },
+      "lower_options": {
+        "uses_memory": false,
+        "uses_strings": false,
+        "uses_realloc": false,
+        "is_async": false,
+        "uses_callback": false
       }
     },
     {
-      "interface_id": 0,
-      "function_name": "record-bool",
-      "core_name": "_import3",
-      "options": {
-        "use_memory": false,
-        "uses_strings": false
+      "import_name": "_import3",
+      "definition": {
+        "Instance": {
+          "interface": 0,
+          "function_name": "record-bool"
+        }
+      },
+      "lower_options": {
+        "uses_memory": false,
+        "uses_strings": false,
+        "uses_realloc": false,
+        "is_async": false,
+        "uses_callback": false
       }
     }
   ],
   "exports": [
     {
-      "interface_id": 1,
-      "function_name": "count-tests",
-      "core_export_name": "component_0",
-      "options": {
-        "use_memory": false,
-        "uses_strings": false
-      }
-    },
-    {
-      "interface_id": 1,
-      "function_name": "invoke-test",
-      "core_export_name": "component_1",
-      "options": {
-        "use_memory": false,
-        "uses_strings": false
+      "implements": 1,
+      "functions": {
+        "invoke-test": {
+          "exported_name": "component_1",
+          "options": {
+            "uses_memory": false,
+            "uses_strings": false,
+            "uses_realloc": false,
+            "is_async": false,
+            "uses_callback": false
+          },
+          "parameters": [
+            {
+              "name": "number",
+              "type": "u32"
+            }
+          ],
+          "result": null
+        },
+        "count-tests": {
+          "exported_name": "component_0",
+          "options": {
+            "uses_memory": false,
+            "uses_strings": false,
+            "uses_realloc": false,
+            "is_async": false,
+            "uses_callback": false
+          },
+          "parameters": [],
+          "result": "u32"
+        }
       }
     }
-  ]
+  ],
+  "world": {
+    "worlds": [
+      {
+        "name": "root",
+        "imports": {
+          "interface-0": {
+            "interface": {
+              "id": 0
+            }
+          }
+        },
+        "exports": {
+          "interface-1": {
+            "interface": {
+              "id": 1
+            }
+          }
+        },
+        "package": 0
+      }
+    ],
+    "interfaces": [
+      {
+        "name": "result-collector",
+        "types": {},
+        "functions": {
+          "record-string": {
+            "name": "record-string",
+            "kind": "freestanding",
+            "params": [
+              {
+                "name": "e",
+                "type": "string"
+              }
+            ]
+          },
+          "record-double": {
+            "name": "record-double",
+            "kind": "freestanding",
+            "params": [
+              {
+                "name": "e",
+                "type": "f64"
+              }
+            ]
+          },
+          "record-int": {
+            "name": "record-int",
+            "kind": "freestanding",
+            "params": [
+              {
+                "name": "e",
+                "type": "s64"
+              }
+            ]
+          },
+          "record-bool": {
+            "name": "record-bool",
+            "kind": "freestanding",
+            "params": [
+              {
+                "name": "e",
+                "type": "bool"
+              }
+            ]
+          }
+        },
+        "package": 0
+      },
+      {
+        "name": "tested-module",
+        "types": {},
+        "functions": {
+          "count-tests": {
+            "name": "count-tests",
+            "kind": "freestanding",
+            "params": [],
+            "result": "u32"
+          },
+          "invoke-test": {
+            "name": "invoke-test",
+            "kind": "freestanding",
+            "params": [
+              {
+                "name": "number",
+                "type": "u32"
+              }
+            ]
+          }
+        },
+        "package": 0
+      }
+    ],
+    "types": [],
+    "packages": [
+      {
+        "name": "wasmdart:tests",
+        "interfaces": {
+          "result-collector": 0,
+          "tested-module": 1
+        },
+        "worlds": {
+          "root": 0
+        }
+      }
+    ]
+  }
 }
