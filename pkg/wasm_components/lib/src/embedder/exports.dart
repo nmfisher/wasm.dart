@@ -20,6 +20,13 @@ import 'string_buffer.dart';
 import 'tmp_print.dart';
 import 'utils.dart';
 
+// The dart.weak*/baseUri/isWindows exports live in [weak.dart]; this import
+// keeps them in the compiled module, exactly like the unused
+// `package:wasm_components` import in the generated bindings keeps this
+// file's own exports alive.
+// ignore: unused_import
+import 'weak.dart';
+
 Never _unsupportedAsyncSchedule() {
   throw StateError('Tried to schedule async operation, outside of async task.');
 }
@@ -353,19 +360,29 @@ WasmVoid wasiPrint(WasmExternRef? string) {
   return WasmVoid();
 }
 
+int _randomState = 0x9E3779B97F4A7C15;
+
 @pragma('wasm:export', 'randomInt')
 WasmI64 randomInt() {
-  // Note: This function is recognized by the component compiler, which will add
-  // a dependency on wasi:random/insecure to replace this function with a
-  // get-insecure-random-u64 import.
-  throw UnsupportedError('wasi:random/insecure not available');
+  // Note: This function is recognized by the component compiler, which will
+  // add a dependency on wasi:random/insecure and replace this export with a
+  // get-insecure-random-u64 import. The xorshift64* fallback below only runs
+  // when the raw module is executed without that rewrite (e.g. in tests),
+  // where the runtime also draws its identityHashCode seed from here.
+  var x = _randomState;
+  x ^= x >> 12;
+  x ^= x << 25;
+  x ^= x >> 27;
+  _randomState = x;
+  return WasmI64.fromInt(x * 0x2545F4914F6CDD1D);
 }
 
 @pragma('wasm:export', 'randomIntSecure')
 WasmI64 randomIntSecure() {
-  // Note: This function is recognized by the component compiler, which will add
-  // a dependency on wasi:random/insecure to replace this function with a
-  // get-random-u64 import.
+  // Note: This function is recognized by the component compiler, which will
+  // add a dependency on wasi:random/random and replace this export with a
+  // get-random-u64 import. Unlike [randomInt] there is no meaningful
+  // in-module fallback: secure randomness has to come from the host.
   throw UnsupportedError('wasi:random/random not available');
 }
 

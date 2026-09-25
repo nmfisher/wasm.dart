@@ -67,16 +67,16 @@ __Legend__:
 | stringToCodeUnits                        | ✅          | 🎯        |                               |
 | monotonicClockFrequency                  | ✅          | 📦        |                               |
 | monotonicClockTicks                      | ✅          | 📦        |                               |
-| weakRefCreate                            |             | 🛑        |                               |
-| weakRefGet                               |             | 🛑        |                               |
-| expandoCreate                            |             | 🛑        |                               |
-| expandoGet                               |             | 🛑        |                               |
-| expandoSet                               |             | 🛑        |                               |
-| finalizerCreate                          |             | 🛑        |                               |
-| finalizerAttach                          |             | 🛑        |                               |
-| finalizerDetach                          |             | 🛑        |                               |
-| baseUri                                  |             | 📦        |                               |
-| isWindows                                |             | 📦        |                               |
+| weakRefCreate                            | ✅          | 🛑        | Strong ref stub; no GC yet    |
+| weakRefGet                               | ✅          | 🛑        | Strong ref stub; no GC yet    |
+| expandoCreate                            | ✅          | 🛑        | Backed by a list; no GC yet   |
+| expandoGet                               | ✅          | 🛑        | Backed by a list; no GC yet   |
+| expandoSet                               | ✅          | 🛑        | Backed by a list; no GC yet   |
+| finalizerCreate                          | ✅          | 🛑        | No-op stub; no GC yet         |
+| finalizerAttach                          | ✅          | 🛑        | No-op stub; no GC yet         |
+| finalizerDetach                          | ✅          | 🛑        | No-op stub; no GC yet         |
+| baseUri                                  | ✅          | 📦        | Fixed file:/// stub           |
+| isWindows                                | ✅          | 📦        | Always false                  |
 | stackTraceGetCurrent                     | ✅          | 🛑        | Impossible, stub used         |
 | stackTraceToString                       | ✅          | 🛑        | Impossible, stub used         |
 | doubleTryParse                           | ✅          | 🎯        |                               |
