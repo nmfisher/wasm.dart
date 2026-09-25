@@ -334,8 +334,14 @@ final class _PrintImports extends _ComponentImport {
     ModuleTransformer transformer,
     w.ImportedFunction function,
   ) {
-    if (!transformer.implicitWasiDependencies) return false;
-
+    // Unlike the randomness rewrite below, this deliberately ignores
+    // `implicitWasiDependencies`: the `component.implicitImport_stdout*`
+    // imports are declared by the embedder in pkg:wasm_components itself, so
+    // they are present in every module linking that embedder (dart2wasm emits
+    // the `dart.print` import unconditionally, even for programs that never
+    // print). Not registering them would make the component-import check
+    // below reject the module. The flag keeps gating imports the compiler
+    // adds on Dart's behalf, where a same-name export fallback exists.
     const typesName = 'wasi:cli/types@0.3.0';
     const stdoutName = 'wasi:cli/stdout@0.3.0';
 
