@@ -90,7 +90,9 @@ final class EmbedderRegexp {
         parser.groupIndicesByName,
       );
     } on FormatException catch (exception) {
-      return exception.message;
+      // The error message crosses the wasm boundary as a string object; it
+      // has to be one of our string implementations, not a plain Dart string.
+      return WasmStringImplementation.fromDartString(exception.message);
     }
   }
 
@@ -230,7 +232,6 @@ final class EmbedderRegexpMatch {
   /// Capture spans; element [i] holds group `i + 1` packed as
   /// `start | (end << 20)`, or 0 when the group did not participate.
   final WasmArray<WasmI32> captures;
-
   EmbedderRegexpMatch(
     this.pattern,
     this.input,
@@ -252,8 +253,9 @@ final class EmbedderRegexpMatch {
     return input.substring(WasmI32.fromInt(begin), WasmI32.fromInt(finish));
   }
 
-  /// Number of capturing groups including group 0.
-  int get groupCount => pattern.groupCount;
+  /// Number of capturing groups excluding group 0 (the whole match): the
+  /// `RegExpMatch.groupCount` contract.
+  int get groupCount => pattern.groupCount - 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -304,7 +306,13 @@ class _Sequence extends _MatchContinuation {
   @override
   int? run(int position) {
     if (index >= nodes.length) return next.run(position);
-    return nodes[index].matchAt(position, matcher, next);
+    // Continue with the rest of this sequence before handing off to [next];
+    // the sequence has to walk its own nodes in order.
+    return nodes[index].matchAt(
+      position,
+      matcher,
+      _Sequence(nodes, index + 1, matcher, next),
+    );
   }
 }
 
@@ -389,6 +397,36 @@ final class _CharNode extends _RegexpNode {
     if (!matcher.codeUnitEqualsAt(position, code)) return null;
     return next.run(position + 1);
   }
+}
+
+/// A code point above the BMP (`\u{...}` escape or a literal astral
+/// character in unicode mode). Stored as one code point and matched against
+/// the subject's surrogate pair; case-insensitive folding is ASCII-only, so
+/// it does not apply here.
+final class _AstralCharNode extends _RegexpNode {
+  final int code;
+
+  _AstralCharNode(this.code);
+
+  @override
+  bool get canMatchEmpty => false;
+
+  @override
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
+    final offset = code - 0x10000;
+    final high = 0xD800 + (offset >> 10);
+    final low = 0xDC00 + (offset & 0x3FF);
+    if (!matcher.codeUnitEqualsAt(position, high)) return null;
+    if (!matcher.codeUnitEqualsAt(position + 1, low)) return null;
+    return next.run(position + 2);
+  }
+}
+
+/// Builds the node for a parsed code point: astral code points in unicode
+/// mode match the subject's surrogate pair as one atom.
+_RegexpNode _charNodeForCodePoint(int code, bool caseInsensitive, bool unicode) {
+  if (unicode && code > 0xFFFF) return _AstralCharNode(code);
+  return _CharNode(code, caseInsensitive);
 }
 
 /// Any code unit except line terminators, unless `s` is set.
@@ -676,7 +714,9 @@ class _CaptureEnd extends _MatchContinuation {
 
   @override
   int? run(int position) {
-    final packed = (position & 0xFFFFF) | ((groupStart & 0xFFFFF) << 20);
+    // Pack as start | (end << 20), matching [EmbedderRegexpMatch.group].
+    final packed =
+        (groupStart & 0xFFFFF) | ((position & 0xFFFFF) << 20);
     final previous = matcher.captures.readUnsigned(slot) & 0xFFFFFFFF;
     matcher.captures.write(slot, packed);
     final result = next.run(position);
@@ -853,7 +893,9 @@ class _RegexpParser {
 
   int position = 0;
 
-  /// Number of capturing groups found so far, including group 0.
+  /// Number of capturing groups found so far, plus 1 for group 0 (the whole
+  /// match). The Dart-visible `RegExpMatch.groupCount` excludes group 0, so
+  /// the SDK export reports [groupCount] - 1.
   int groupCount = 1;
   final List<String?> groupNames = <String?>[null];
   final Map<String, int> groupIndicesByName = <String, int>{};
@@ -884,10 +926,14 @@ class _RegexpParser {
     final alternatives = <List<_RegexpNode>>[];
     for (;;) {
       final nodes = <_RegexpNode>[];
-      while (peek() != -1 && peek() != 0x29) {
+      while (peek() != -1 && peek() != 0x29 && peek() != 0x7c) {
         nodes.add(parseQuantified());
       }
       alternatives.add(nodes);
+      if (peek() == 0x7c) {
+        position++; // `|`
+        continue;
+      }
       if (atEnd) return alternatives;
       fail('Unmatched )');
     }
@@ -994,7 +1040,7 @@ class _RegexpParser {
         fail('Unexpected end of pattern');
     }
     final code = next();
-    return _CharNode(code, caseInsensitive);
+    return _charNodeForCodePoint(code, caseInsensitive, unicode);
   }
 
   /// Parses a group starting after `(`.
@@ -1039,7 +1085,7 @@ class _RegexpParser {
     final alternatives = <List<_RegexpNode>>[];
     for (;;) {
       final nodes = <_RegexpNode>[];
-      while (peek() != -1 && peek() != 0x29) {
+      while (peek() != -1 && peek() != 0x29 && peek() != 0x7c) {
         nodes.add(parseQuantified());
       }
       alternatives.add(nodes);
@@ -1053,8 +1099,8 @@ class _RegexpParser {
   }
 
   String parseGroupName() {
-    if (peek() != 0x3e) fail('Invalid capture group name');
-    position++; // `>`
+    // Read the raw name up to `>`; like the VM, accept any characters rather
+    // than validating the JS IdentifierStart/IdentifierPart grammar.
     final start = position;
     while (peek() != 0x3e && peek() != -1) {
       position++;
@@ -1108,7 +1154,7 @@ class _RegexpParser {
         }
         fail('Invalid \\c escape');
       case 0x78:
-        return _CharNode(readHex(2), caseInsensitive);
+        return _charNodeForCodePoint(readHex(2), caseInsensitive, unicode);
       case 0x75:
         return parseUnicodeEscape();
       default:
@@ -1146,9 +1192,9 @@ class _RegexpParser {
       }
       if (!any || atEnd) fail('Invalid unicode escape');
       position++; // `}`
-      return _CharNode(value, caseInsensitive);
+      return _charNodeForCodePoint(value, caseInsensitive, unicode);
     }
-    return _CharNode(readHex(4), caseInsensitive);
+    return _charNodeForCodePoint(readHex(4), caseInsensitive, unicode);
   }
 
   /// Parses a character class; the `[` is already consumed.

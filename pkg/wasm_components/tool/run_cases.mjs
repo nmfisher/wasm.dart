@@ -300,24 +300,43 @@ function runCase(dartFile, wasmFile) {
     componentImports[info.name] = implementation;
   }
 
-  instance = new WebAssembly.Instance(module, {
-    dart,
-    libc: {
-      memory: libc.memory,
-      dart_realloc: libc.realloc,
-      dart_free: libc.free,
-    },
-    component: componentImports,
-  });
+  const caseName = path.basename(dartFile);
+  // Every phase below can trap. Wrapping each one names the phase in the
+  // error output, which turns "[object WebAssembly.Exception]" from the
+  // top-level handler into a usable pointer.
+  try {
+    instance = new WebAssembly.Instance(module, {
+      dart,
+      libc: {
+        memory: libc.memory,
+        dart_realloc: libc.realloc,
+        dart_free: libc.free,
+      },
+      component: componentImports,
+    });
+  } catch (error) {
+    console.error(`FAIL ${caseName}: instantiation threw`, String(error));
+    throw error;
+  }
 
   // Runs `main`, which registers the test cases.
-  instance.exports.main();
+  try {
+    instance.exports.main();
+  } catch (error) {
+    console.error(`FAIL ${caseName}: main threw`, String(error));
+    throw error;
+  }
 
   const count = instance.exports.component_0();
   const lines = collector.lines;
   for (let i = 0; i < count; i++) {
     lines.push(`{"type":"start","test":${i}}`);
-    instance.exports.component_1(i);
+    try {
+      instance.exports.component_1(i);
+    } catch (error) {
+      console.error(`FAIL ${caseName}: test ${i} threw`, String(error));
+      throw error;
+    }
     lines.push(`{"type":"end","test":${i}}`);
   }
   return `${lines.join('\n')}\n`;
