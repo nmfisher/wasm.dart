@@ -90,7 +90,9 @@ final class EmbedderRegexp {
         parser.groupIndicesByName,
       );
     } on FormatException catch (exception) {
-      return exception.message;
+      // The error message crosses the wasm boundary as a string object; it
+      // has to be one of our string implementations, not a plain Dart string.
+      return WasmStringImplementation.fromDartString(exception.message);
     }
   }
 
@@ -105,7 +107,12 @@ final class EmbedderRegexp {
     if (start < 0 || start > length) return null;
     final limit = asPrefix ? start : length;
     for (var position = start; position <= limit; position++) {
-      final captures = WasmArray<WasmI32>(groupCount > 0 ? groupCount - 1 : 0);
+      // Two slots per group (start and end); -1 marks "did not participate",
+      // which distinguishes an empty span at offset 0 from an unset group.
+      final captures = WasmArray<WasmI32>.filled(
+        2 * (groupCount - 1),
+        WasmI32.fromInt(-1),
+      );
       final matcher = _RegexpMatcher(this, string, captures);
       final end = matcher.search(position, asPrefix);
       if (end != null) {
@@ -227,10 +234,9 @@ final class EmbedderRegexpMatch {
   /// Code-unit offset just past the match.
   final int end;
 
-  /// Capture spans; element [i] holds group `i + 1` packed as
-  /// `start | (end << 20)`, or 0 when the group did not participate.
+  /// Capture spans: slots `2 * i` and `2 * i + 1` hold the start and end of
+  /// group `i + 1`, or -1 when that group did not participate.
   final WasmArray<WasmI32> captures;
-
   EmbedderRegexpMatch(
     this.pattern,
     this.input,
@@ -245,15 +251,15 @@ final class EmbedderRegexpMatch {
     if (index == 0) {
       return input.substring(WasmI32.fromInt(start), WasmI32.fromInt(end));
     }
-    final packed = captures.readUnsigned(index - 1) & 0xFFFFFFFF;
-    if (packed == 0) return null;
-    final begin = packed & 0xFFFFF;
-    final finish = (packed >>> 20) & 0xFFFFF;
+    final begin = captures.readSigned(2 * (index - 1));
+    if (begin < 0) return null;
+    final finish = captures.readSigned(2 * (index - 1) + 1);
     return input.substring(WasmI32.fromInt(begin), WasmI32.fromInt(finish));
   }
 
-  /// Number of capturing groups including group 0.
-  int get groupCount => pattern.groupCount;
+  /// Number of capturing groups excluding group 0 (the whole match): the
+  /// `RegExpMatch.groupCount` contract.
+  int get groupCount => pattern.groupCount - 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -304,7 +310,13 @@ class _Sequence extends _MatchContinuation {
   @override
   int? run(int position) {
     if (index >= nodes.length) return next.run(position);
-    return nodes[index].matchAt(position, matcher, next);
+    // Continue with the rest of this sequence before handing off to [next];
+    // the sequence has to walk its own nodes in order.
+    return nodes[index].matchAt(
+      position,
+      matcher,
+      _Sequence(nodes, index + 1, matcher, next),
+    );
   }
 }
 
@@ -319,11 +331,6 @@ class _RegexpMatcher {
   final WasmArray<WasmI32> captures;
   final int inputLength;
 
-  /// Where the current trial was anchored. In prefix mode `^` only matches
-  /// here (or after a line terminator in multiline mode); in search mode `^`
-  /// anchors to index 0 like JavaScript's non-multiline `^`.
-  int trialStart = 0;
-
   _RegexpMatcher(this.pattern, this.string, this.captures)
       : inputLength = string.length;
 
@@ -331,7 +338,6 @@ class _RegexpMatcher {
   /// is set, otherwise finds the leftmost match at or after [position].
   /// Returns the end of the match or null.
   int? search(int position, bool asPrefix) {
-    trialStart = asPrefix ? position : 0;
     return _tryAlternatives(
       pattern._alternatives,
       this,
@@ -362,6 +368,23 @@ class _RegexpMatcher {
     final code = string.codeUnitAtUnchecked(position);
     return code == 0x0a || code == 0x0d || code == 0x2028 || code == 0x2029;
   }
+
+  /// Copies every capture slot; [restoreCaptures] puts them back.
+  List<int> snapshotCaptures() {
+    final slots = captures.length;
+    final snapshot = List<int>.filled(slots, -1);
+    for (var i = 0; i < slots; i++) {
+      snapshot[i] = captures.readSigned(i);
+    }
+    return snapshot;
+  }
+
+  /// Writes [snapshot] back into the capture slots.
+  void restoreCaptures(List<int> snapshot) {
+    for (var i = 0; i < snapshot.length; i++) {
+      captures.write(i, snapshot[i]);
+    }
+  }
 }
 
 bool _foldEquals(int actual, int expected) {
@@ -389,6 +412,36 @@ final class _CharNode extends _RegexpNode {
     if (!matcher.codeUnitEqualsAt(position, code)) return null;
     return next.run(position + 1);
   }
+}
+
+/// A code point above the BMP (`\u{...}` escape or a literal astral
+/// character in unicode mode). Stored as one code point and matched against
+/// the subject's surrogate pair; case-insensitive folding is ASCII-only, so
+/// it does not apply here.
+final class _AstralCharNode extends _RegexpNode {
+  final int code;
+
+  _AstralCharNode(this.code);
+
+  @override
+  bool get canMatchEmpty => false;
+
+  @override
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
+    final offset = code - 0x10000;
+    final high = 0xD800 + (offset >> 10);
+    final low = 0xDC00 + (offset & 0x3FF);
+    if (!matcher.codeUnitEqualsAt(position, high)) return null;
+    if (!matcher.codeUnitEqualsAt(position + 1, low)) return null;
+    return next.run(position + 2);
+  }
+}
+
+/// Builds the node for a parsed code point: astral code points in unicode
+/// mode match the subject's surrogate pair as one atom.
+_RegexpNode _charNodeForCodePoint(int code, bool caseInsensitive, bool unicode) {
+  if (unicode && code > 0xFFFF) return _AstralCharNode(code);
+  return _CharNode(code, caseInsensitive);
 }
 
 /// Any code unit except line terminators, unless `s` is set.
@@ -428,9 +481,8 @@ final class _AnchorNode extends _RegexpNode {
       return ok ? next.run(position) : null;
     }
     final ok = isMultiLine
-        ? position == matcher.trialStart ||
-            matcher.isLineTerminatorAt(position - 1)
-        : position == matcher.trialStart;
+        ? position == 0 || matcher.isLineTerminatorAt(position - 1)
+        : position == 0;
     return ok ? next.run(position) : null;
   }
 }
@@ -586,8 +638,13 @@ int? _tryAlternatives(
   int position,
 ) {
   for (var a = 0; a < alternatives.length; a++) {
+    // Captures written inside an alternative (including inside a lookahead,
+    // whose sub-match never runs the failing continuation) are undone when
+    // that alternative fails: backtracking must see the state from before it.
+    final saved = matcher.snapshotCaptures();
     final result = _Sequence(alternatives[a], 0, matcher, next).run(position);
     if (result != null) return result;
+    matcher.restoreCaptures(saved);
   }
   return null;
 }
@@ -616,13 +673,15 @@ int? _tryCapturing(
   _MatchContinuation next,
   int position,
 ) {
-  final slot = captureIndex - 1;
-  final previous = matcher.captures.readUnsigned(slot) & 0xFFFFFFFF;
+  final startSlot = 2 * (captureIndex - 1);
+  final previousStart = matcher.captures.readSigned(startSlot);
+  final previousEnd = matcher.captures.readSigned(startSlot + 1);
   return _tryCapturingFrom(
     alternatives,
     0,
-    slot,
-    previous,
+    startSlot,
+    previousStart,
+    previousEnd,
     matcher,
     next,
     position,
@@ -632,32 +691,36 @@ int? _tryCapturing(
 int? _tryCapturingFrom(
   List<List<_RegexpNode>> alternatives,
   int alternativeIndex,
-  int slot,
-  int previous,
+  int startSlot,
+  int previousStart,
+  int previousEnd,
   _RegexpMatcher matcher,
   _MatchContinuation next,
   int position,
 ) {
   if (alternativeIndex >= alternatives.length) {
     // All alternatives failed: put back the span the group had before.
-    matcher.captures.write(slot, previous);
+    matcher.captures.write(startSlot, previousStart);
+    matcher.captures.write(startSlot + 1, previousEnd);
     return null;
   }
   final result = _Sequence(
     alternatives[alternativeIndex],
     0,
     matcher,
-    _CaptureEnd(slot, matcher, next, position),
+    _CaptureEnd(startSlot, matcher, next, position),
   ).run(position);
   if (result != null) return result;
   // Undo the span the failed alternative wrote so later backtracking sees the
   // state from before this group.
-  matcher.captures.write(slot, previous);
+  matcher.captures.write(startSlot, previousStart);
+  matcher.captures.write(startSlot + 1, previousEnd);
   return _tryCapturingFrom(
     alternatives,
     alternativeIndex + 1,
-    slot,
-    previous,
+    startSlot,
+    previousStart,
+    previousEnd,
     matcher,
     next,
     position,
@@ -667,21 +730,21 @@ int? _tryCapturingFrom(
 /// Writes the capture span, then resumes [next]; restores the previous span
 /// when the rest of the match fails.
 class _CaptureEnd extends _MatchContinuation {
-  final int slot;
+  final int startSlot;
   final _RegexpMatcher matcher;
   final _MatchContinuation next;
   final int groupStart;
 
-  _CaptureEnd(this.slot, this.matcher, this.next, this.groupStart);
+  _CaptureEnd(this.startSlot, this.matcher, this.next, this.groupStart);
 
   @override
   int? run(int position) {
-    final packed = (position & 0xFFFFF) | ((groupStart & 0xFFFFF) << 20);
-    final previous = matcher.captures.readUnsigned(slot) & 0xFFFFFFFF;
-    matcher.captures.write(slot, packed);
+    matcher.captures.write(startSlot, groupStart);
+    matcher.captures.write(startSlot + 1, position);
     final result = next.run(position);
     if (result == null) {
-      matcher.captures.write(slot, previous);
+      matcher.captures.write(startSlot, -1);
+      matcher.captures.write(startSlot + 1, -1);
     }
     return result;
   }
@@ -696,14 +759,31 @@ class _GroupEnd extends _MatchContinuation {
 }
 
 /// `atom{min,max}` (`max < 0`: unbounded), greedy or lazy.
+///
+/// [firstCapture] is the 1-based index of the first capture group inside
+/// [atom] (0 when the atom captures nothing) and [captureCount] is the number
+/// of groups the atom contains. Following the ECMAScript `RepeatMatcher`,
+/// those captures are cleared at the start of every iteration, and an
+/// iteration that consumes no input is rejected once no more iterations are
+/// required — the combination that both bounds the recursion (an empty match
+/// can never spawn another empty match) and gives `(a|(b))+` on `aba` a null
+/// second group instead of a stale one.
 final class _QuantifierNode extends _RegexpNode {
   final _RegexpNode atom;
   final int min;
   final int max;
   final bool lazy;
+  final int firstCapture;
+  final int captureCount;
 
-  _QuantifierNode(this.atom, this.min, this.max, this.lazy)
-      : assert(min >= 0),
+  _QuantifierNode(
+    this.atom,
+    this.min,
+    this.max,
+    this.lazy, [
+    this.firstCapture = 0,
+    this.captureCount = 0,
+  ])  : assert(min >= 0),
         assert(max < 0 || max >= min);
 
   @override
@@ -711,104 +791,149 @@ final class _QuantifierNode extends _RegexpNode {
 
   @override
   int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
-    if (lazy) {
-      return _repeatLazy(atom, min, max, matcher, next, position, 0);
-    }
-    return _repeatGreedy(atom, min, max, matcher, next, position, 0);
+    return _repeat(
+      atom, min, max, lazy, firstCapture, captureCount, matcher, next, position,
+    );
   }
 }
 
-int? _repeatGreedy(
+/// Runs one iteration of the repetition: clears the atom's captures, matches
+/// the atom, then continues the repetition in [_RepeatContinue]. Restores the
+/// cleared captures when the iteration fails, so backtracking sees the state
+/// from before the iteration.
+int? _repeatIteration(
   _RegexpNode atom,
   int min,
   int max,
+  bool lazy,
+  int firstCapture,
+  int captureCount,
   _RegexpMatcher matcher,
   _MatchContinuation next,
   int position,
-  int count,
 ) {
-  if (max < 0 || count < max) {
-    final result = _Sequence(
-      [atom],
-      0,
-      matcher,
-      _GreedyContinue(atom, min, max, matcher, next, count),
-    ).run(position);
-    if (result != null) return result;
+  final saved = _saveCaptures(matcher, firstCapture, captureCount);
+  final result = _Sequence(
+    [atom],
+    0,
+    matcher,
+    _RepeatContinue(
+      atom, min, max, lazy, firstCapture, captureCount,
+      matcher, next, position,
+    ),
+  ).run(position);
+  if (result == null) {
+    _restoreCaptures(matcher, firstCapture, saved);
   }
-  if (count >= min) return next.run(position);
-  return null;
+  return result;
 }
 
-class _GreedyContinue extends _MatchContinuation {
+/// Copies the [count] capture slots of the groups [firstCapture] ..
+/// [firstCapture + count - 1] and then marks them unset.
+List<int> _saveCaptures(
+  _RegexpMatcher matcher,
+  int firstCapture,
+  int count,
+) {
+  final slot = 2 * (firstCapture - 1);
+  final saved = List<int>.filled(2 * count, -1);
+  for (var i = 0; i < 2 * count; i++) {
+    saved[i] = matcher.captures.readSigned(slot + i);
+    matcher.captures.write(slot + i, -1);
+  }
+  return saved;
+}
+
+void _restoreCaptures(
+  _RegexpMatcher matcher,
+  int firstCapture,
+  List<int> saved,
+) {
+  final slot = 2 * (firstCapture - 1);
+  for (var i = 0; i < saved.length; i++) {
+    matcher.captures.write(slot + i, saved[i]);
+  }
+}
+
+/// Continues the repetition after one iteration matched. An iteration that
+/// ends where it started is rejected when no further iteration was required
+/// (`RepeatMatcher` step 2a of ECMAScript): without it, `(?:)*` would recurse
+/// forever.
+class _RepeatContinue extends _MatchContinuation {
   final _RegexpNode atom;
   final int min;
   final int max;
+  final bool lazy;
+  final int firstCapture;
+  final int captureCount;
   final _RegexpMatcher matcher;
   final _MatchContinuation next;
-  final int count;
+  final int iterationStart;
 
-  _GreedyContinue(
+  _RepeatContinue(
     this.atom,
     this.min,
     this.max,
+    this.lazy,
+    this.firstCapture,
+    this.captureCount,
     this.matcher,
     this.next,
-    this.count,
+    this.iterationStart,
   );
 
   @override
   int? run(int position) {
-    return _repeatGreedy(atom, min, max, matcher, next, position, count + 1);
+    if (min == 0 && position == iterationStart) return null;
+    return _repeat(
+      atom,
+      min == 0 ? 0 : min - 1,
+      max < 0 ? max : max - 1,
+      lazy,
+      firstCapture,
+      captureCount,
+      matcher,
+      next,
+      position,
+    );
   }
 }
 
-int? _repeatLazy(
+/// One step of the `RepeatMatcher`: [min] and [max] count the iterations
+/// still allowed, greedy repetitions try one more iteration before
+/// continuing past the quantifier, lazy ones continue first.
+int? _repeat(
   _RegexpNode atom,
   int min,
   int max,
+  bool lazy,
+  int firstCapture,
+  int captureCount,
   _RegexpMatcher matcher,
   _MatchContinuation next,
   int position,
-  int count,
 ) {
-  if (count >= min) {
-    final result = next.run(position);
-    if (result != null) return result;
+  if (max == 0) return next.run(position);
+  if (min != 0) {
+    return _repeatIteration(
+      atom, min, max, lazy, firstCapture, captureCount,
+      matcher, next, position,
+    );
   }
-  if (max < 0 || count < max) {
-    final result = _Sequence(
-      [atom],
-      0,
-      matcher,
-      _LazyContinue(atom, min, max, matcher, next, count),
-    ).run(position);
+  if (!lazy) {
+    final result = _repeatIteration(
+      atom, min, max, lazy, firstCapture, captureCount,
+      matcher, next, position,
+    );
     if (result != null) return result;
+    return next.run(position);
   }
-  return null;
-}
-
-class _LazyContinue extends _MatchContinuation {
-  final _RegexpNode atom;
-  final int min;
-  final int max;
-  final _RegexpMatcher matcher;
-  final _MatchContinuation next;
-  final int count;
-
-  _LazyContinue(
-    this.atom,
-    this.min,
-    this.max,
-    this.matcher,
-    this.next,
-    this.count,
+  final result = next.run(position);
+  if (result != null) return result;
+  return _repeatIteration(
+    atom, min, max, lazy, firstCapture, captureCount,
+    matcher, next, position,
   );
-
-  @override
-  int? run(int position) {
-    return _repeatLazy(atom, min, max, matcher, next, position, count + 1);
-  }
 }
 
 /// `\1` .. `\99`: matches the same text as the referenced group.
@@ -822,10 +947,9 @@ final class _BackreferenceNode extends _RegexpNode {
 
   @override
   int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
-    final packed = matcher.captures.readUnsigned(groupIndex - 1) & 0xFFFFFFFF;
-    if (packed == 0) return next.run(position); // unset: matches empty
-    final begin = packed & 0xFFFFF;
-    final finish = (packed >>> 20) & 0xFFFFF;
+    final begin = matcher.captures.readSigned(2 * (groupIndex - 1));
+    if (begin < 0) return next.run(position); // unset: matches empty
+    final finish = matcher.captures.readSigned(2 * (groupIndex - 1) + 1);
     var offset = position;
     for (var i = begin; i < finish; i++) {
       if (!matcher.codeUnitEqualsAt(
@@ -853,7 +977,14 @@ class _RegexpParser {
 
   int position = 0;
 
-  /// Number of capturing groups found so far, including group 0.
+  /// Number of capturing groups found so far, plus 1 for group 0 (the whole
+  /// match). The Dart-visible `RegExpMatch.groupCount` excludes group 0, so
+  /// the SDK export reports [groupCount] - 1.
+  /// Group indices each parsed node's captures received, so quantifiers can
+  /// find the groups inside their atom. Only group nodes get entries.
+  final Map<_RegexpNode, (int, int)> _capturedRanges = {};
+
+  /// Number of capturing groups including group 0.
   int groupCount = 1;
   final List<String?> groupNames = <String?>[null];
   final Map<String, int> groupIndicesByName = <String, int>{};
@@ -884,10 +1015,14 @@ class _RegexpParser {
     final alternatives = <List<_RegexpNode>>[];
     for (;;) {
       final nodes = <_RegexpNode>[];
-      while (peek() != -1 && peek() != 0x29) {
+      while (peek() != -1 && peek() != 0x29 && peek() != 0x7c) {
         nodes.add(parseQuantified());
       }
       alternatives.add(nodes);
+      if (peek() == 0x7c) {
+        position++; // `|`
+        continue;
+      }
       if (atEnd) return alternatives;
       fail('Unmatched )');
     }
@@ -898,13 +1033,27 @@ class _RegexpParser {
     final atom = parseAtom();
     final quantifier = _tryParseQuantifier();
     if (quantifier == null) return atom;
-    var node = _QuantifierNode(atom, quantifier.$1, quantifier.$2, false);
+    final range = _captureRangeOf(atom);
+    final firstCapture = range == null ? 0 : range.$1;
+    final captureCount = range == null ? 0 : range.$2 - range.$1 + 1;
+    var node = _QuantifierNode(
+      atom, quantifier.$1, quantifier.$2, false, firstCapture, captureCount,
+    );
     if (peek() == 0x3f) {
       position++;
-      node = _QuantifierNode(atom, quantifier.$1, quantifier.$2, true);
+      node = _QuantifierNode(
+        atom, quantifier.$1, quantifier.$2, true, firstCapture, captureCount,
+      );
     }
     return node;
   }
+
+  /// The group indices the atom's captures received, null when it has none.
+  ///
+  /// Recording ranges as nodes are parsed keeps the quantifier's capture
+  /// bookkeeping (clearing inner groups per iteration) working without
+  /// requiring node types to expose capture information.
+  (int, int)? _captureRangeOf(_RegexpNode atom) => _capturedRanges[atom];
 
   (int, int)? _tryParseQuantifier() {
     switch (peek()) {
@@ -994,7 +1143,7 @@ class _RegexpParser {
         fail('Unexpected end of pattern');
     }
     final code = next();
-    return _CharNode(code, caseInsensitive);
+    return _charNodeForCodePoint(code, caseInsensitive, unicode);
   }
 
   /// Parses a group starting after `(`.
@@ -1031,7 +1180,13 @@ class _RegexpParser {
       if (name != null) groupIndicesByName[name] = captureIndex;
     }
     final alternatives = parseGroupAlternatives();
-    return _GroupNode(alternatives, captureIndex, kind);
+    final node = _GroupNode(alternatives, captureIndex, kind);
+    if (kind == 1) {
+      // The range covers this group's own index and every nested group parsed
+      // while its body was parsed (they all got higher indices).
+      _capturedRanges[node] = (captureIndex, groupCount - 1);
+    }
+    return node;
   }
 
   /// Parses `alternatives)` inside a group.
@@ -1039,7 +1194,7 @@ class _RegexpParser {
     final alternatives = <List<_RegexpNode>>[];
     for (;;) {
       final nodes = <_RegexpNode>[];
-      while (peek() != -1 && peek() != 0x29) {
+      while (peek() != -1 && peek() != 0x29 && peek() != 0x7c) {
         nodes.add(parseQuantified());
       }
       alternatives.add(nodes);
@@ -1053,8 +1208,8 @@ class _RegexpParser {
   }
 
   String parseGroupName() {
-    if (peek() != 0x3e) fail('Invalid capture group name');
-    position++; // `>`
+    // Read the raw name up to `>`; like the VM, accept any characters rather
+    // than validating the JS IdentifierStart/IdentifierPart grammar.
     final start = position;
     while (peek() != 0x3e && peek() != -1) {
       position++;
@@ -1108,7 +1263,7 @@ class _RegexpParser {
         }
         fail('Invalid \\c escape');
       case 0x78:
-        return _CharNode(readHex(2), caseInsensitive);
+        return _charNodeForCodePoint(readHex(2), caseInsensitive, unicode);
       case 0x75:
         return parseUnicodeEscape();
       default:
@@ -1146,9 +1301,9 @@ class _RegexpParser {
       }
       if (!any || atEnd) fail('Invalid unicode escape');
       position++; // `}`
-      return _CharNode(value, caseInsensitive);
+      return _charNodeForCodePoint(value, caseInsensitive, unicode);
     }
-    return _CharNode(readHex(4), caseInsensitive);
+    return _charNodeForCodePoint(readHex(4), caseInsensitive, unicode);
   }
 
   /// Parses a character class; the `[` is already consumed.
