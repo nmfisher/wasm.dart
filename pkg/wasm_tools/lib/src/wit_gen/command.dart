@@ -76,7 +76,7 @@ final class GenerateWitInteropCommand extends Command<void> {
     if (await outputDirectory.exists()) {
       await outputDirectory.delete(recursive: true);
     }
-    await outputDirectory.create();
+    await outputDirectory.create(recursive: true);
 
     for (final generatedFile in generated) {
       var contents = generatedFile.contents;

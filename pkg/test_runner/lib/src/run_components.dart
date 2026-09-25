@@ -1,44 +1,43 @@
-import 'component.g.dart';
+import 'components/wasmdart_tests.dart';
+import 'components/wasmdart_tests_root.dart';
 import 'testcase.dart';
 
 void defineTests(List<TestCase> cases) {
-  defineInstanceExport(unnamedExport1: _ExportTestModule(cases));
+  rootComponent((imports) => _ExportTestModule(cases, imports));
 }
 
-final class _ImportedCollector implements BaseResultCollector {
-  const _ImportedCollector();
-
+final class const _ImportedCollector(final ResultCollector collector)
+    implements BaseResultCollector {
   @override
   void recordDouble({required double e}) {
-    importedInstance0.recordDouble(e: e);
+    collector.recordDouble(e: e);
   }
 
   @override
   void recordInt({required int e}) {
-    importedInstance0.recordInt(e: e);
+    collector.recordInt(e: e);
   }
 
   @override
   void recordString({required String e}) {
-    importedInstance0.recordString(e: e);
+    collector.recordString(e: e);
   }
 
   @override
   void recordBool({required bool e}) {
-    importedInstance0.recordBool(e: e);
+    collector.recordBool(e: e);
   }
 }
 
-final class _ExportTestModule implements TestedModule {
-  final List<TestCase> cases;
-
-  new(this.cases);
+final class _ExportTestModule(final List<TestCase> cases, RootImports imports)
+    implements TestedModule {
+  final _collector = _ImportedCollector(imports.testsResultCollector);
 
   @override
   int countTests() => cases.length;
 
   @override
   void invokeTest({required int number}) {
-    cases[number](const _ImportedCollector());
+    cases[number](_collector);
   }
 }

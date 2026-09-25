@@ -5,7 +5,7 @@ resolution: workspace
 repository: https://github.com/simolus3/wasm.dart/
 
 environment:
-  sdk: ^3.13.0
+  sdk: ^3.14.0-251.0.dev
 
 dependencies:
   args: ^2.7.0

@@ -6,7 +6,7 @@ allowing them to run as CLI applications, servers and more targets with compatib
 The goal is to get `wasmtime run dart_compiled_app.wasm` to work without further setup.
 
 > [!NOTE]
-> These tools are in development and can't handle much more than a hello world program at the moment.
+> These tools are still in development and not ready for production. Please file issues for problems you run into!
 
 ## Approach
 
@@ -43,10 +43,10 @@ __Legend__:
 
 | Method                                   | Implemented | Category | Notes                         |
 |------------------------------------------|-------------|----------|-------------------------------|
-| scheduleOnce                             |             | 📦        |                               |
-| scheduleRepeated                         |             | 📦        |                               |
-| queueMicrotask                           |             | 🎯        |                               |
-| clearSchedule                            |             | 📦        |                               |
+| scheduleOnce                             | ✅          | 📦        |                               |
+| scheduleRepeated                         | ✅          | 📦        |                               |
+| queueMicrotask                           | ✅          | 🎯        |                               |
+| clearSchedule                            | ✅          | 📦        |                               |
 | currentTimeMicros                        | ✅          | 📦        |                               |
 | stringFromCharCodeArray                  |             | 🎯        |                               |
 | stringFromAsciiBytes                     | ✅          | 🎯        |                               |

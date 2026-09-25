@@ -2,10 +2,6 @@
 
 Tools to compile Dart to standalone WebAssembly targets, including the WebAssembly component model.
 
-> [!CAUTION]
-> This functionality is highly experimental. It requires a Dart 3.13 SDK with
-> [this patch](https://dart-review.googlesource.com/c/sdk/+/505900) applied.
-
 ## Installation
 
 This package should be installed as a dev-dependency: `dart pub add --dev wasm_tools`
@@ -29,10 +25,11 @@ interface greeting {
 }
 ```
 
-First, run `dart run wasm_tools witgen -i test.wit`. This will generate:
+First, run `dart run wasm_tools witgen -i test.wit`. In `lib/src/components` (the directory can be changed with `-o`), this generates:
 
-- `lib/src/component.g.dart`, a file to bridge between Dart types and the component model.
-- `hook/wasm_abi.json`, containing a copy of the WIT file with additional metadata for the compiler.
+- `demo_component.dart`, a Dart interface describing `greeting`.
+- `demo_component_root.dart`, bindings to bridge between the Dart interface and the low-level component ABI.
+- `demo_component_root.json`, additional metadata for the compiler.
 
 ## Compiling a component
 
@@ -41,15 +38,14 @@ Create a `bin/greeting.dart` with these contents:
 
 ```dart
 // bin/greeting.dart
-import 'package:greeting/src/component.g.dart';
+import 'package:greeting/src/components/demo_component.dart';
+import 'package:greeting/src/components/demo_component_root.dart';
 
-void main(List<String> arguments) {
-  defineInstanceExport(unnamedExport0: const _Greeting());
+void main() {
+  rootComponent((_) => _Greeting());
 }
 
-final class _Greeting implements Greeting {
-  const _Greeting();
-
+final class const _Greeting() implements Greeting {
   @override
   String generateGreeting() {
     return 'Hello from Dart!';
@@ -57,26 +53,28 @@ final class _Greeting implements Greeting {
 }
 ```
 
-To inform the compiler about the ABI file, also create a `hook/build.dart` file containing:
+To inform the compiler about the ABI file, also create a `hook/link.dart` file containing:
 
 ```dart
-// hook/build.dart
+// hook/link.dart
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:hooks/hooks.dart';
 import 'package:wasm_tools/hooks.dart';
 
-void main(List<String> args) => build(args, (input, output) async {
+void main(List<String> args) => link(args, (input, output) async {
   if (input.config.buildWasmComponent) {
-    final abi = input.packageRoot.resolve('hook/wasm_abi.json');
+    final abi = input.packageRoot.resolve(
+      'lib/src/components/demo_component_root.json',
+    );
 
     output.dependencies.add(abi);
     output.assets.webAssemblyComponents.add(
       WasmComponentAsset(
-        encoded:
-            json.decode(File(abi.toFilePath()).readAsStringSync())
-                as Map<String, Object?>,
+        encoded: json.decode(
+          File(abi.toFilePath()).readAsStringSync(),
+        ) as Map<String, Object?>,
       ),
     );
   }

@@ -35,6 +35,7 @@ void main() async {
         '--output',
         wasmFile,
         '--hooks-include-dev-dependencies',
+        '--no-implicit-wasi-imports',
       ]);
 
       if (result.exitCode != 0) {
