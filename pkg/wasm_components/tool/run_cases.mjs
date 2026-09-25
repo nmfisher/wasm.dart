@@ -288,6 +288,34 @@ function runCase(dartFile, wasmFile) {
     _import2: collector.recordInt,
     _import3: collector.recordBool,
   };
+  // The embedder's `print` implementation talks to `wasi:cli/stdout` through
+  // the `implicitImport_stdout*` canon primitives (see tmp_print.dart).
+  // dart2wasm emits the `dart.print` import unconditionally, so every module
+  // linking the embedder declares these imports even when no case prints.
+  // The raw-module host has no component-model event loop, so it cannot run
+  // the full stream/future protocol `print` needs. Host them as traps:
+  // instantiation succeeds (the imports must be provided), and any case that
+  // actually prints fails loudly here instead of silently dropping output.
+  for (const name of [
+    'implicitImport_stdoutWriteViaStream',
+    'implicitImport_stdoutStreamNew',
+    'implicitImport_stdoutStreamWrite',
+    'implicitImport_stdoutStreamRead',
+    'implicitImport_stdoutStreamDropReadable',
+    'implicitImport_stdoutStreamDropWritable',
+    'implicitImport_stdoutFutureNew',
+    'implicitImport_stdoutFutureWrite',
+    'implicitImport_stdoutFutureRead',
+    'implicitImport_stdoutFutureDropReadable',
+    'implicitImport_stdoutFutureDropWritable',
+  ]) {
+    component[name] = () => {
+      throw new Error(
+        `print() is not available in raw-module tests: the raw host cannot ` +
+          `run the wasi:cli/stdout protocol (component.${name}).`,
+      );
+    };
+  }
   // The collector imports are named _import0.._import3 in the generated
   // bindings. Any import without a host implementation fails instantiation
   // with a clear message below.
