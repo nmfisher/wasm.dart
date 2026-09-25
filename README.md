@@ -119,7 +119,7 @@ __Legend__:
 | mathLog                                  | ✅          | 🎯        | Using `libm` in Rust.         |
 | randomInt                                | ✅          | 📦        |                               |
 | randomIntSecure                          | ✅          | 📦        |                               |
-| print                                    |             | 📦        | Currently a stub              |
+| print                                    |             | 📦        | Stub; needs wasi:cli/stdout   |
 | jsonEncodeString                         | ✅          | 🎯        | Currently a stub              |
 | debugger                                 | ✅          | 🛑        | No-op; no debugger attached   |
 | inspect                                  | ✅          | 🛑        | No-op; no debugger attached |
