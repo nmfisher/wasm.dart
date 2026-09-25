@@ -1,0 +1,10 @@
+{"type":"start","test":0}
+{"type":"bool","value":true}
+{"type":"bool","value":true}
+{"type":"end","test":0}
+{"type":"start","test":1}
+{"type":"int","value":2026}
+{"type":"int","value":30}
+{"type":"bool","value":true}
+{"type":"bool","value":true}
+{"type":"end","test":1}
