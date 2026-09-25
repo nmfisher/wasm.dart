@@ -13,6 +13,7 @@ import 'double_format.dart';
 import 'double_parse.dart';
 import 'json_encode.dart';
 import 'number_format.dart';
+import 'regexp.dart';
 import 'stack_trace.dart';
 import 'string.dart';
 import 'string_buffer.dart';
@@ -393,4 +394,125 @@ WasmI32 monotonicClockFrequency() {
 @pragma('wasm:export', 'monotonicClockTicks')
 WasmI64 monotonicClockTicks() {
   return dartMonotonicTicks.toWasmI64();
+}
+
+// ---------------------------------------------------------------------------
+// dart.regexp* — implemented in embedder/regexp.dart
+// ---------------------------------------------------------------------------
+
+/// Compiled regexps and matches cross the wasm boundary as opaque objects,
+/// exactly like `_DoubleTryParseResult` above. The SDK distinguishes a
+/// successful compile from an error-string result with [regexpIsRegexp].
+@pragma('wasm:export', 'regexpCreateOrFailWithString')
+WasmExternRef regexpCreateOrFailWithString(
+  WasmExternRef? string,
+  WasmI32 multiLine,
+  WasmI32 caseSensitive,
+  WasmI32 unicode,
+  WasmI32 dotAll,
+) {
+  final compiled = EmbedderRegexp.compile(
+    WasmStringImplementation.fromExtern(string).toDartString(),
+    multiLine.toBool(),
+    caseSensitive.toBool(),
+    unicode.toBool(),
+    dotAll.toBool(),
+  );
+  return WasmAnyRef.fromObject(compiled).externalize();
+}
+
+@pragma('wasm:export', 'regexpIsRegexp')
+WasmI32 regexpIsRegexp(WasmExternRef? ref) {
+  return WasmI32.fromBool(ref!.internalize().toObject() is EmbedderRegexp);
+}
+
+@pragma('wasm:export', 'regexpEscape')
+WasmExternRef regexpEscape(WasmExternRef? string) {
+  return EmbedderRegexp.escape(WasmStringImplementation.fromExtern(string))
+      .externalize();
+}
+
+@pragma('wasm:export', 'regexpMatch')
+WasmExternRef? regexpMatch(
+  WasmExternRef? regexp,
+  WasmExternRef? string,
+  WasmI32 start,
+  WasmI32 asPrefix,
+) {
+  final pattern = regexp!.internalize().toObject() as EmbedderRegexp;
+  final match = pattern.match(
+    WasmStringImplementation.fromExtern(string),
+    start.toIntUnsigned(),
+    asPrefix.toBool(),
+  );
+  if (match == null) return WasmExternRef.nullRef;
+  return WasmAnyRef.fromObject(match).externalize();
+}
+
+@pragma('wasm:export', 'regexpMatchGetStart')
+WasmI32 regexpMatchGetStart(WasmExternRef? match) {
+  final m = match!.internalize().toObject() as EmbedderRegexpMatch;
+  return WasmI32.fromInt(m.start);
+}
+
+@pragma('wasm:export', 'regexpMatchGetEnd')
+WasmI32 regexpMatchGetEnd(WasmExternRef? match) {
+  final m = match!.internalize().toObject() as EmbedderRegexpMatch;
+  return WasmI32.fromInt(m.end);
+}
+
+@pragma('wasm:export', 'regexpMatchGetGroupCount')
+WasmI32 regexpMatchGetGroupCount(WasmExternRef? match) {
+  final m = match!.internalize().toObject() as EmbedderRegexpMatch;
+  return WasmI32.fromInt(m.groupCount);
+}
+
+@pragma('wasm:export', 'regexpMatchGetGroup')
+WasmExternRef? regexpMatchGetGroup(WasmExternRef? match, WasmI32 index) {
+  final m = match!.internalize().toObject() as EmbedderRegexpMatch;
+  final group = m.group(index.toIntUnsigned());
+  if (group == null) return WasmExternRef.nullRef;
+  return group.externalize();
+}
+
+@pragma('wasm:export', 'regexpMatchGetNamedGroups')
+WasmI32 regexpMatchGetNamedGroups(WasmExternRef? match) {
+  final m = match!.internalize().toObject() as EmbedderRegexpMatch;
+  return WasmI32.fromInt(m.pattern.groupIndicesByName.length);
+}
+
+@pragma('wasm:export', 'regexpMatchGetGroupName')
+WasmExternRef regexpMatchGetGroupName(WasmExternRef? match, WasmI32 index) {
+  final m = match!.internalize().toObject() as EmbedderRegexpMatch;
+  final name = m.pattern.groupNames[index.toIntUnsigned()];
+  // SDK contract: never called with an out-of-range index; guard anyway so a
+  // bad call stays non-fatal.
+  if (name == null) return Latin1String.empty.externalize();
+  return name.externalize();
+}
+
+@pragma('wasm:export', 'regexpMatchGetGroupByName')
+WasmExternRef? regexpMatchGetGroupByName(WasmExternRef? match, WasmI32 nameIndex) {
+  final m = match!.internalize().toObject() as EmbedderRegexpMatch;
+  final name = m.pattern.groupNames[nameIndex.toIntUnsigned()];
+  final groupIndex = m.pattern.groupIndicesByName[name];
+  if (groupIndex == null) return WasmExternRef.nullRef;
+  final group = m.group(groupIndex);
+  if (group == null) return WasmExternRef.nullRef;
+  return group.externalize();
+}
+
+@pragma('wasm:export', 'stringReplaceAllRegExp')
+WasmExternRef stringReplaceAllRegExp(
+  WasmExternRef? string,
+  WasmExternRef? needle,
+  WasmExternRef? replacement,
+) {
+  final pattern = needle!.internalize().toObject() as EmbedderRegexp;
+  return pattern
+      .replaceAllRegExp(
+        WasmStringImplementation.fromExtern(string),
+        WasmStringImplementation.fromExtern(replacement),
+      )
+      .externalize();
 }
