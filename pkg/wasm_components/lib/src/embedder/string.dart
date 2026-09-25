@@ -207,6 +207,16 @@ sealed class WasmStringImplementation {
     return ref!.internalize().toObject() as WasmStringImplementation;
   }
 
+  /// Copies the code units into a plain Dart string (used at API boundaries,
+  /// e.g. regexp patterns handed to the parser).
+  String toDartString() {
+    final buffer = StringBuffer();
+    for (var i = 0; i < length; i++) {
+      buffer.writeCharCode(codeUnitAtUnchecked(i));
+    }
+    return buffer.toString();
+  }
+
   static WasmStringImplementation _concatUtf16(
     WasmStringImplementation a,
     WasmStringImplementation b,
