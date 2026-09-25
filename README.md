@@ -122,6 +122,6 @@ __Legend__:
 | print                                    |             | 📦        | Currently a stub              |
 | jsonEncodeString                         | ✅          | 🎯        | Currently a stub              |
 | debugger                                 |             | 🛑        |                               |
-| inspect                                  |             | 🛑        |                               |
-| dartTimelineStreamEnabled                |             | 🛑        |                               |
-| reportTaskEvent                          |             | 🛑        |                               |
+| inspect                                  | ✅          | 🛑        | No-op; no debugger attached |
+| dartTimelineStreamEnabled                | ✅          | 🛑        | Always false                  |
+| reportTaskEvent                          | ✅          | 🛑        | No-op stub; events dropped    |

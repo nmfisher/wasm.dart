@@ -1,0 +1,8 @@
+{"type":"start","test":0}
+{"type":"bool","value":true}
+{"type":"bool","value":true}
+{"type":"string","value":"echo"}
+{"type":"end","test":0}
+{"type":"start","test":1}
+{"type":"bool","value":true}
+{"type":"end","test":1}
