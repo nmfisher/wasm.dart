@@ -9,7 +9,7 @@ The goal is to get `wasmtime run dart_compiled_app.wasm` to work without further
 > These tools are still in development and not ready for production. Please file issues for problems you run into!
 >
 > dart2wasm (as of Dart 3.13) emits the legacy `try` instruction in SDK internals, which Wasmtime's
-> engine does not implement, so compiled components validate but can't run yet (see `schedule*`/`print` rows).
+> engine does not implement, so compiled components validate but can't run yet (see the `print` row).
 
 ## Approach
 
@@ -46,10 +46,10 @@ __Legend__:
 
 | Method                                   | Implemented | Category | Notes                         |
 |------------------------------------------|-------------|----------|-------------------------------|
-| scheduleOnce                             | ✅          | 📦        | Stub; throws in raw module    |
-| scheduleRepeated                         | ✅          | 📦        | Stub; throws in raw module    |
+| scheduleOnce                             | ✅          | 📦        | Stub; always throws           |
+| scheduleRepeated                         | ✅          | 📦        | Stub; always throws           |
 | queueMicrotask                           | ✅          | 🎯        |                               |
-| clearSchedule                            | ✅          | 📦        | Stub; throws in raw module    |
+| clearSchedule                            | ✅          | 📦        | Stub; always throws           |
 | currentTimeMicros                        | ✅          | 📦        |                               |
 | stringFromCharCodeArray                  | ✅          | 🎯        |                               |
 | stringFromAsciiBytes                     | ✅          | 🎯        |                               |
@@ -97,7 +97,7 @@ __Legend__:
 | stringBufferClear                        | ✅          | 🎯        |                               |
 | stringBufferLength                       | ✅          | 🎯        |                               |
 | stringBufferToString                     | ✅          | 🎯        |                               |
-| regexpCreateOrFailWithString             | ✅          | 🎯        | See [what Kotlin does](https://github.com/JetBrains/kotlin/tree/master/libraries/stdlib/native-wasm/src/kotlin/text/regex)          |
+| regexpCreateOrFailWithString             | ✅          | 🎯        | Custom engine; no lookbehind  |
 | regexpIsRegexp                           | ✅          | 🎯        |                               |
 | regexpEscape                             | ✅          | 🎯        |                               |
 | regexpMatch                              | ✅          | 🎯        |                               |
@@ -120,10 +120,10 @@ __Legend__:
 | mathAtan                                 | ✅          | 🎯        | Using `libm` in Rust.         |
 | mathExp                                  | ✅          | 🎯        | Using `libm` in Rust.         |
 | mathLog                                  | ✅          | 🎯        | Using `libm` in Rust.         |
-| randomInt                                | ✅          | 📦        |                               |
-| randomIntSecure                          | ✅          | 📦        |                               |
+| randomInt                                | ✅          | 📦        | Deterministic in raw module   |
+| randomIntSecure                          | ✅          | 📦        | Throws in raw module          |
 | print                                    | ✅          | 📦        | Via `wasi:cli/stdout`; see note at top |
-| jsonEncodeString                         | ✅          | 🎯        | Currently a stub              |
+| jsonEncodeString                         | ✅          | 🎯        | JSON string escaping          |
 | debugger                                 | ✅          | 🛑        | No-op; no debugger attached   |
 | inspect                                  | ✅          | 🛑        | No-op; no debugger attached |
 | dartTimelineStreamEnabled                | ✅          | 🛑        | Always false                  |
