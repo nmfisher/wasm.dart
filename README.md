@@ -7,6 +7,9 @@ The goal is to get `wasmtime run dart_compiled_app.wasm` to work without further
 
 > [!NOTE]
 > These tools are in development and can't handle much more than a hello world program at the moment.
+>
+> dart2wasm (as of Dart 3.13) emits the legacy `try` instruction in SDK internals, which Wasmtime's
+> engine does not implement, so compiled components validate but can't run yet (see `schedule*`/`print` rows).
 
 ## Approach
 
@@ -119,7 +122,7 @@ __Legend__:
 | mathLog                                  | ✅          | 🎯        | Using `libm` in Rust.         |
 | randomInt                                | ✅          | 📦        |                               |
 | randomIntSecure                          | ✅          | 📦        |                               |
-| print                                    |             | 📦        | Stub; needs wasi:cli/stdout   |
+| print                                    | ✅          | 📦        | Via `wasi:cli/stdout`; see note at top |
 | jsonEncodeString                         | ✅          | 🎯        | Currently a stub              |
 | debugger                                 | ✅          | 🛑        | No-op; no debugger attached   |
 | inspect                                  | ✅          | 🛑        | No-op; no debugger attached |
