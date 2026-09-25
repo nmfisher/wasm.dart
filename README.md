@@ -43,10 +43,10 @@ __Legend__:
 
 | Method                                   | Implemented | Category | Notes                         |
 |------------------------------------------|-------------|----------|-------------------------------|
-| scheduleOnce                             |             | 📦        |                               |
-| scheduleRepeated                         |             | 📦        |                               |
+| scheduleOnce                             | ✅          | 📦        | Stub; throws in raw module    |
+| scheduleRepeated                         | ✅          | 📦        | Stub; throws in raw module    |
 | queueMicrotask                           | ✅          | 🎯        |                               |
-| clearSchedule                            |             | 📦        |                               |
+| clearSchedule                            | ✅          | 📦        | Stub; throws in raw module    |
 | currentTimeMicros                        | ✅          | 📦        |                               |
 | stringFromCharCodeArray                  | ✅          | 🎯        |                               |
 | stringFromAsciiBytes                     | ✅          | 🎯        |                               |
@@ -121,7 +121,7 @@ __Legend__:
 | randomIntSecure                          | ✅          | 📦        |                               |
 | print                                    |             | 📦        | Currently a stub              |
 | jsonEncodeString                         | ✅          | 🎯        | Currently a stub              |
-| debugger                                 |             | 🛑        |                               |
+| debugger                                 | ✅          | 🛑        | No-op; no debugger attached   |
 | inspect                                  | ✅          | 🛑        | No-op; no debugger attached |
 | dartTimelineStreamEnabled                | ✅          | 🛑        | Always false                  |
 | reportTaskEvent                          | ✅          | 🛑        | No-op stub; events dropped    |
