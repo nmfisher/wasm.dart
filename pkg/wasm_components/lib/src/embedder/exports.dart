@@ -484,18 +484,41 @@ WasmI32 regexpMatchGetNamedGroups(WasmExternRef? match) {
 @pragma('wasm:export', 'regexpMatchGetGroupName')
 WasmExternRef regexpMatchGetGroupName(WasmExternRef? match, WasmI32 index) {
   final m = match!.internalize().toObject() as EmbedderRegexpMatch;
-  final name = m.pattern.groupNames[index.toIntUnsigned()];
+  // SDK contract: [index] is between 0 and namedGroups (exclusive), counting
+  // only the *named* groups in capture-order — not the slot in groupNames
+  // (index 0 there is the unnamed whole match).
+  var remaining = index.toIntUnsigned();
+  for (var i = 1; i < m.pattern.groupNames.length; i++) {
+    final name = m.pattern.groupNames[i];
+    if (name == null) continue;
+    if (remaining == 0) {
+      // The parser stores plain Dart strings; the SDK expects one of our
+      // string implementations on the other side of the boundary.
+      return WasmStringImplementation.fromDartString(name).externalize();
+    }
+    remaining--;
+  }
   // SDK contract: never called with an out-of-range index; guard anyway so a
   // bad call stays non-fatal.
-  if (name == null) return Latin1String.empty.externalize();
-  return name.externalize();
+  return Latin1String.empty.externalize();
 }
 
 @pragma('wasm:export', 'regexpMatchGetGroupByName')
 WasmExternRef? regexpMatchGetGroupByName(WasmExternRef? match, WasmI32 nameIndex) {
   final m = match!.internalize().toObject() as EmbedderRegexpMatch;
-  final name = m.pattern.groupNames[nameIndex.toIntUnsigned()];
-  final groupIndex = m.pattern.groupIndicesByName[name];
+  // Same index space as regexpMatchGetGroupName: the nameIndex-th named group.
+  var remaining = nameIndex.toIntUnsigned();
+  String? name;
+  for (var i = 1; i < m.pattern.groupNames.length; i++) {
+    final candidate = m.pattern.groupNames[i];
+    if (candidate == null) continue;
+    if (remaining == 0) {
+      name = candidate;
+      break;
+    }
+    remaining--;
+  }
+  final groupIndex = name == null ? null : m.pattern.groupIndicesByName[name];
   if (groupIndex == null) return WasmExternRef.nullRef;
   final group = m.group(groupIndex);
   if (group == null) return WasmExternRef.nullRef;
