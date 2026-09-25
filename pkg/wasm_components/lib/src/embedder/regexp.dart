@@ -116,6 +116,65 @@ final class EmbedderRegexp {
     return null;
   }
 
+  /// Replaces every match with [replacement] (`dart.stringReplaceAllRegExp`;
+  /// the SDK passes the already-compiled regexp object as the pattern).
+  ///
+  /// The SDK's `String.replaceAll` does not consult `$` group references in
+  /// [replacement] for the embedder path, so the replacement is inserted
+  /// verbatim, like the string-based specialization.
+  WasmStringImplementation replaceAllRegExp(
+    WasmStringImplementation string,
+    WasmStringImplementation replacement,
+  ) {
+    final length = string.length;
+
+    // Pass 1: find the matches and size the result exactly.
+    final spans = <List<int>>[]; // [matchStart, matchEnd, copyFrom] triples.
+    var resultLength = 0;
+    var searchFrom = 0;
+    while (searchFrom <= length) {
+      final found = match(string, searchFrom, false);
+      if (found == null) break;
+      if (found.start > searchFrom) {
+        spans.add([searchFrom, found.start, 1]);
+        resultLength += found.start - searchFrom;
+      }
+      spans.add([0, 0, 0]); // 0/0/0 marks the replacement.
+      resultLength += replacement.length;
+      if (found.end == found.start) {
+        // Zero-width match: copy the code unit the match consumed nothing of
+        // and step over it, so the loop terminates.
+        if (found.end < length) {
+          spans.add([found.end, found.end + 1, 1]);
+          resultLength++;
+        }
+        searchFrom = found.end + 1;
+      } else {
+        searchFrom = found.end;
+      }
+    }
+    if (searchFrom < length) {
+      spans.add([searchFrom, length, 1]);
+      resultLength += length - searchFrom;
+    }
+
+    // Pass 2: write the result in one allocation.
+    final result = WasmArray<WasmI16>(resultLength);
+    var offset = 0;
+    for (final span in spans) {
+      if (span[2] == 0) {
+        for (var i = 0; i < replacement.length; i++) {
+          result.write(offset++, replacement.codeUnitAtUnchecked(i));
+        }
+      } else {
+        for (var i = span[0]; i < span[1]; i++) {
+          result.write(offset++, string.codeUnitAtUnchecked(i));
+        }
+      }
+    }
+    return Utf16String.unsafeWrap(result);
+  }
+
   /// Escapes [text] for verbatim use inside a pattern. JavaScript escapes
   /// exactly `$ ( ) * + . ? [ \ ] ^ { | }` (`dart.regexpEscape`).
   static WasmStringImplementation escape(WasmStringImplementation text) {
@@ -260,18 +319,19 @@ class _RegexpMatcher {
   final WasmArray<WasmI32> captures;
   final int inputLength;
 
-  /// Where the current trial was anchored. `^` only matches here (or after a
-  /// line terminator in multiline mode).
+  /// Where the current trial was anchored. In prefix mode `^` only matches
+  /// here (or after a line terminator in multiline mode); in search mode `^`
+  /// anchors to index 0 like JavaScript's non-multiline `^`.
   int trialStart = 0;
 
   _RegexpMatcher(this.pattern, this.string, this.captures)
       : inputLength = string.length;
 
-  /// Matches the whole pattern starting exactly at [position]; returns the end
-  /// of the match or null. The trial stays anchored at [position], so `^`
-  /// only matches there (plus after line terminators in multiline mode).
+  /// Matches the whole pattern starting exactly at [position] when [asPrefix]
+  /// is set, otherwise finds the leftmost match at or after [position].
+  /// Returns the end of the match or null.
   int? search(int position, bool asPrefix) {
-    trialStart = position;
+    trialStart = asPrefix ? position : 0;
     return _tryAlternatives(
       pattern._alternatives,
       this,
