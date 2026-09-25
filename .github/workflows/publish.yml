@@ -5,6 +5,7 @@ on:
     tags:
       - 'wasm_tools-[0-9]+.[0-9]+.[0-9]+*'
       - 'wasm_components-[0-9]+.[0-9]+.[0-9]+*'
+      - 'wasi-[0-9]+.[0-9]+.[0-9]+*'
 
 permissions: {}
 concurrency:
@@ -51,3 +52,12 @@ jobs:
       if: "${{ startsWith(github.ref_name, 'wasm_tools-') }}"
       run: dart pub publish -f
       working-directory: pkg/wasm_tools
+
+    - name: Publish wasi - dry run
+      if: "${{ startsWith(github.ref_name, 'wasi-') }}"
+      run: dart pub publish --dry-run
+      working-directory: pkg/wasi
+    - name: Publish wasi to pub.dev
+      if: "${{ startsWith(github.ref_name, 'wasi-') }}"
+      run: dart pub publish -f
+      working-directory: pkg/wasi

@@ -1,7 +1,7 @@
 name: wasm_components
 description: Runtime definitions to help run Dart apps as WebAssembly components.
 resolution: workspace
-version: 0.1.0-preview.0
+version: 0.1.1-preview.0
 repository: https://github.com/simolus3/wasm.dart/
 environment:
   sdk: ^3.13.0
