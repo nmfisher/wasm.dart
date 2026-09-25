@@ -138,3 +138,31 @@ WasmExternRef? baseUri() {
 WasmI32 isWindows() {
   return WasmI32.fromBool(false);
 }
+
+/// (`dart.timelineStreamEnabled`) Reports that no timeline stream is
+/// listened to, which keeps `dart:developer`'s Timeline helpers from
+/// calling [reportTaskEvent] at all.
+@pragma('wasm:export')
+WasmI32 timelineStreamEnabled() {
+  return WasmI32.fromBool(false);
+}
+
+/// (`dart.reportTaskEvent`) Only reachable when a timeline stream is
+/// enabled, which [timelineStreamEnabled] never reports; drops the event.
+@pragma('wasm:export')
+WasmI32 reportTaskEvent(
+  WasmI32 taskId,
+  WasmI32 flowId,
+  WasmI32 type,
+  WasmExternRef? name,
+  WasmExternRef? argumentsAsJson,
+) {
+  return WasmI32.fromBool(false);
+}
+
+/// (`dart.inspect`) No debugger can be attached in this embedder; the
+/// reference is dropped and the value echoed back by the SDK patch.
+@pragma('wasm:export')
+WasmVoid inspect(WasmAnyRef? object) {
+  return WasmVoid();
+}
