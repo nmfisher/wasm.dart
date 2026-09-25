@@ -7,6 +7,9 @@ The goal is to get `wasmtime run dart_compiled_app.wasm` to work without further
 
 > [!NOTE]
 > These tools are in development and can't handle much more than a hello world program at the moment.
+>
+> dart2wasm (as of Dart 3.13) emits the legacy `try` instruction in SDK internals, which Wasmtime's
+> engine does not implement, so compiled components validate but can't run yet (see `schedule*`/`print` rows).
 
 ## Approach
 
@@ -43,12 +46,12 @@ __Legend__:
 
 | Method                                   | Implemented | Category | Notes                         |
 |------------------------------------------|-------------|----------|-------------------------------|
-| scheduleOnce                             |             | 📦        |                               |
-| scheduleRepeated                         |             | 📦        |                               |
-| queueMicrotask                           |             | 🎯        |                               |
-| clearSchedule                            |             | 📦        |                               |
+| scheduleOnce                             | ✅          | 📦        | Stub; throws in raw module    |
+| scheduleRepeated                         | ✅          | 📦        | Stub; throws in raw module    |
+| queueMicrotask                           | ✅          | 🎯        |                               |
+| clearSchedule                            | ✅          | 📦        | Stub; throws in raw module    |
 | currentTimeMicros                        | ✅          | 📦        |                               |
-| stringFromCharCodeArray                  |             | 🎯        |                               |
+| stringFromCharCodeArray                  | ✅          | 🎯        |                               |
 | stringFromAsciiBytes                     | ✅          | 🎯        |                               |
 | stringLength                             | ✅          | 🎯        |                               |
 | stringEquals                             | ✅          | 🎯        |                               |
@@ -56,57 +59,57 @@ __Legend__:
 | stringCodeUnitAt                         | ✅          | 🎯        |                               |
 | stringIndexOfString                      | ✅          | 🎯        |                               |
 | stringLastIndexOfString                  | ✅          | 🎯        |                               |
-| stringReplaceAllString                   |             | 🎯        |                               |
-| stringReplaceAllRegExp                   |             | 🎯        |                               |
+| stringReplaceAllString                   | ✅          | 🎯        |                               |
+| stringReplaceAllRegExp                   | ✅          | 🎯        |                               |
 | stringSubstring                          | ✅          | 🎯        |                               |
 | stringToLowerCase                        | ✅          | 🎯        |                               |
 | stringToUpperCase                        | ✅          | 🎯        |                               |
 | stringConcat                             | ✅          | 🎯        |                               |
 | stringRepeat                             | ✅          | 🎯        |                               |
-| stringReplaceRange                       |             | 🎯        |                               |
-| stringToCodeUnits                        |             | 🎯        |                               |
+| stringReplaceRange                       | ✅          | 🎯        |                               |
+| stringToCodeUnits                        | ✅          | 🎯        |                               |
 | monotonicClockFrequency                  | ✅          | 📦        |                               |
 | monotonicClockTicks                      | ✅          | 📦        |                               |
-| weakRefCreate                            |             | 🛑        |                               |
-| weakRefGet                               |             | 🛑        |                               |
-| expandoCreate                            |             | 🛑        |                               |
-| expandoGet                               |             | 🛑        |                               |
-| expandoSet                               |             | 🛑        |                               |
-| finalizerCreate                          |             | 🛑        |                               |
-| finalizerAttach                          |             | 🛑        |                               |
-| finalizerDetach                          |             | 🛑        |                               |
-| baseUri                                  |             | 📦        |                               |
-| isWindows                                |             | 📦        |                               |
+| weakRefCreate                            | ✅          | 🛑        | Strong ref stub; no GC yet    |
+| weakRefGet                               | ✅          | 🛑        | Strong ref stub; no GC yet    |
+| expandoCreate                            | ✅          | 🛑        | Backed by a list; no GC yet   |
+| expandoGet                               | ✅          | 🛑        | Backed by a list; no GC yet   |
+| expandoSet                               | ✅          | 🛑        | Backed by a list; no GC yet   |
+| finalizerCreate                          | ✅          | 🛑        | No-op stub; no GC yet         |
+| finalizerAttach                          | ✅          | 🛑        | No-op stub; no GC yet         |
+| finalizerDetach                          | ✅          | 🛑        | No-op stub; no GC yet         |
+| baseUri                                  | ✅          | 📦        | Fixed file:/// stub           |
+| isWindows                                | ✅          | 📦        | Always false                  |
 | stackTraceGetCurrent                     | ✅          | 🛑        | Impossible, stub used         |
 | stackTraceToString                       | ✅          | 🛑        | Impossible, stub used         |
-| doubleTryParse                           |             | 🎯        |                               |
-| tryParseResultGetDouble                  |             | 🎯        |                               |
-| doubleParseInfallible                    |             | 🎯        |                               |
+| doubleTryParse                           | ✅          | 🎯        |                               |
+| tryParseResultGetDouble                  | ✅          | 🎯        |                               |
+| doubleParseInfallible                    | ✅          | 🎯        |                               |
 | i64ToString                              | ✅          | 🎯        | Needs optimization for base10 |
-| f64ToExponential                         |             | 🎯        |                               |
-| f64ToExponentialWithFractionDigits       |             | 🎯        |                               |
-| f64ToPrecision                           |             | 🎯        |                               |
-| f64ToFixed                               |             | 🎯        |                               |
-| f64ToString                              |             | 🎯        | Currently a stub              |
+| f64ToExponential                         | ✅          | 🎯        |                               |
+| f64ToExponentialWithFractionDigits       | ✅          | 🎯        |                               |
+| f64ToPrecision                           | ✅          | 🎯        |                               |
+| f64ToFixed                               | ✅          | 🎯        |                               |
+| f64ToString                              | ✅          | 🎯        |                               |
 | stringBufferCreate                       | ✅          | 🎯        |                               |
 | stringBufferWriteString                  | ✅          | 🎯        |                               |
 | stringBufferWriteCharCode                | ✅          | 🎯        |                               |
 | stringBufferClear                        | ✅          | 🎯        |                               |
 | stringBufferLength                       | ✅          | 🎯        |                               |
 | stringBufferToString                     | ✅          | 🎯        |                               |
-| regexpCreateOrFailWithString             |             | 🎯        | See [what Kotlin does](https://github.com/JetBrains/kotlin/tree/master/libraries/stdlib/native-wasm/src/kotlin/text/regex)          |
-| regexpIsRegexp                           |             | 🎯        |                               |
-| regexpEscape                             |             | 🎯        |                               |
-| regexpMatch                              |             | 🎯        |                               |
-| regexpMatchGetStart                      |             | 🎯        |                               |
-| regexpMatchGetEnd                        |             | 🎯        |                               |
-| regexpMatchGetGroupCount                 |             | 🎯        |                               |
-| regexpMatchGetGroup                      |             | 🎯        |                               |
-| regexpMatchGetNamedGroups                |             | 🎯        |                               |
-| regexpMatchGetGroupName                  |             | 🎯        |                               |
-| regexpMatchGetGroupByName                |             | 🎯        |                               |
-| timeZoneNameForClampedSeconds            |             | 📦        | Unimplemented in wasmtime     |
-| timeZoneOffsetInSecondsForClampedSeconds |             | 📦        | Unimplemented in wasmtime     |
+| regexpCreateOrFailWithString             | ✅          | 🎯        | See [what Kotlin does](https://github.com/JetBrains/kotlin/tree/master/libraries/stdlib/native-wasm/src/kotlin/text/regex)          |
+| regexpIsRegexp                           | ✅          | 🎯        |                               |
+| regexpEscape                             | ✅          | 🎯        |                               |
+| regexpMatch                              | ✅          | 🎯        |                               |
+| regexpMatchGetStart                      | ✅          | 🎯        |                               |
+| regexpMatchGetEnd                        | ✅          | 🎯        |                               |
+| regexpMatchGetGroupCount                 | ✅          | 🎯        |                               |
+| regexpMatchGetGroup                      | ✅          | 🎯        |                               |
+| regexpMatchGetNamedGroups                | ✅          | 🎯        |                               |
+| regexpMatchGetGroupName                  | ✅          | 🎯        |                               |
+| regexpMatchGetGroupByName                | ✅          | 🎯        |                               |
+| timeZoneNameForClampedSeconds            | ✅          | 📦        | UNKNOWN TZ id (no tz db)      |
+| timeZoneOffsetInSecondsForClampedSeconds | ✅          | 📦        | Always 0 (UTC; no tz db)      |
 | mathPow                                  | ✅          | 🎯        | Using `libm` in Rust.         |
 | mathAtan2                                | ✅          | 🎯        | Using `libm` in Rust.         |
 | mathSin                                  | ✅          | 🎯        | Using `libm` in Rust.         |
@@ -119,9 +122,9 @@ __Legend__:
 | mathLog                                  | ✅          | 🎯        | Using `libm` in Rust.         |
 | randomInt                                | ✅          | 📦        |                               |
 | randomIntSecure                          | ✅          | 📦        |                               |
-| print                                    |             | 📦        | Currently a stub              |
-| jsonEncodeString                         |             | 🎯        | Currently a stub              |
-| debugger                                 |             | 🛑        |                               |
-| inspect                                  |             | 🛑        |                               |
-| dartTimelineStreamEnabled                |             | 🛑        |                               |
-| reportTaskEvent                          |             | 🛑        |                               |
+| print                                    | ✅          | 📦        | Via `wasi:cli/stdout`; see note at top |
+| jsonEncodeString                         | ✅          | 🎯        | Currently a stub              |
+| debugger                                 | ✅          | 🛑        | No-op; no debugger attached   |
+| inspect                                  | ✅          | 🛑        | No-op; no debugger attached |
+| dartTimelineStreamEnabled                | ✅          | 🛑        | Always false                  |
+| reportTaskEvent                          | ✅          | 🛑        | No-op stub; events dropped    |
