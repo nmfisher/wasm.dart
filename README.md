@@ -57,7 +57,7 @@ __Legend__:
 | stringIndexOfString                      | ✅          | 🎯        |                               |
 | stringLastIndexOfString                  | ✅          | 🎯        |                               |
 | stringReplaceAllString                   | ✅          | 🎯        |                               |
-| stringReplaceAllRegExp                   |             | 🎯        |                               |
+| stringReplaceAllRegExp                   | ✅          | 🎯        |                               |
 | stringSubstring                          | ✅          | 🎯        |                               |
 | stringToLowerCase                        | ✅          | 🎯        |                               |
 | stringToUpperCase                        | ✅          | 🎯        |                               |
@@ -94,17 +94,17 @@ __Legend__:
 | stringBufferClear                        | ✅          | 🎯        |                               |
 | stringBufferLength                       | ✅          | 🎯        |                               |
 | stringBufferToString                     | ✅          | 🎯        |                               |
-| regexpCreateOrFailWithString             |             | 🎯        | See [what Kotlin does](https://github.com/JetBrains/kotlin/tree/master/libraries/stdlib/native-wasm/src/kotlin/text/regex)          |
-| regexpIsRegexp                           |             | 🎯        |                               |
-| regexpEscape                             |             | 🎯        |                               |
-| regexpMatch                              |             | 🎯        |                               |
-| regexpMatchGetStart                      |             | 🎯        |                               |
-| regexpMatchGetEnd                        |             | 🎯        |                               |
-| regexpMatchGetGroupCount                 |             | 🎯        |                               |
-| regexpMatchGetGroup                      |             | 🎯        |                               |
-| regexpMatchGetNamedGroups                |             | 🎯        |                               |
-| regexpMatchGetGroupName                  |             | 🎯        |                               |
-| regexpMatchGetGroupByName                |             | 🎯        |                               |
+| regexpCreateOrFailWithString             | ✅          | 🎯        | See [what Kotlin does](https://github.com/JetBrains/kotlin/tree/master/libraries/stdlib/native-wasm/src/kotlin/text/regex)          |
+| regexpIsRegexp                           | ✅          | 🎯        |                               |
+| regexpEscape                             | ✅          | 🎯        |                               |
+| regexpMatch                              | ✅          | 🎯        |                               |
+| regexpMatchGetStart                      | ✅          | 🎯        |                               |
+| regexpMatchGetEnd                        | ✅          | 🎯        |                               |
+| regexpMatchGetGroupCount                 | ✅          | 🎯        |                               |
+| regexpMatchGetGroup                      | ✅          | 🎯        |                               |
+| regexpMatchGetNamedGroups                | ✅          | 🎯        |                               |
+| regexpMatchGetGroupName                  | ✅          | 🎯        |                               |
+| regexpMatchGetGroupByName                | ✅          | 🎯        |                               |
 | timeZoneNameForClampedSeconds            |             | 📦        | Unimplemented in wasmtime     |
 | timeZoneOffsetInSecondsForClampedSeconds |             | 📦        | Unimplemented in wasmtime     |
 | mathPow                                  | ✅          | 🎯        | Using `libm` in Rust.         |
