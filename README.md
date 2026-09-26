@@ -9,7 +9,10 @@ The goal is to get `wasmtime run dart_compiled_app.wasm` to work without further
 > These tools are still in development and not ready for production. Please file issues for problems you run into!
 >
 > dart2wasm (as of Dart 3.13) emits the legacy `try` instruction in SDK internals, which Wasmtime's
-> engine does not implement, so compiled components validate but can't run yet (see the `print` row).
+> engine does not implement, so compiled components validate but can't run in Wasmtime yet (see
+> the `print` row). The raw-module harness in `pkg/wasm_components/tool/run_cases.mjs` does run
+> them: it implements the component-model event loop (canon streams/futures, waitable sets and
+> the `callback` pump), so `print` completes there.
 
 ## Approach
 
@@ -122,7 +125,7 @@ __Legend__:
 | mathLog                                  | ✅          | 🎯        | Using `libm` in Rust.         |
 | randomInt                                | ✅          | 📦        | Deterministic in raw module   |
 | randomIntSecure                          | ✅          | 📦        | Throws in raw module          |
-| print                                    | ✅          | 📦        | Via `wasi:cli/stdout`; see note at top |
+| print                                    | ✅          | 📦        | Via `wasi:cli/stdout`; completes at run time in the raw-module harness |
 | jsonEncodeString                         | ✅          | 🎯        | JSON string escaping          |
 | debugger                                 | ✅          | 🛑        | No-op; no debugger attached   |
 | inspect                                  | ✅          | 🛑        | No-op; no debugger attached |
