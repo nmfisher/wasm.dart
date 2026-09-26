@@ -9,8 +9,10 @@ import 'string.dart';
 /// - `"` becomes `\"`, `\` becomes `\\`
 /// - `\b \t \n \f \r` use their short escapes
 /// - other control characters become `\u00xx` with lowercase hex
-/// - everything else (0x7f, lone surrogates, non-ASCII, U+2028/9) is copied
-///   through unchanged
+/// - an unpaired surrogate becomes `\udXXX` (dart:convert escapes it rather
+///   than emitting an invalid code unit)
+/// - everything else (0x7f, paired surrogates, non-ASCII, U+2028/9) is
+///   copied through unchanged
 WasmStringImplementation jsonEncodeStringImpl(WasmStringImplementation source) {
   final length = source.length;
 
@@ -32,6 +34,8 @@ WasmStringImplementation jsonEncodeStringImpl(WasmStringImplementation source) {
         default:
           extra += 5; // \u00xx
       }
+    } else if (_isUnpairedSurrogateAt(source, i)) {
+      extra += 5; // \udXXX
     }
   }
 
@@ -88,14 +92,22 @@ WasmStringImplementation jsonEncodeStringImpl(WasmStringImplementation source) {
   out.write(0, 0x22);
   var offset = 1;
   for (var i = 0; i < length; i++) {
-    offset = _writeEscaped(out, offset, source.codeUnitAtUnchecked(i));
+    offset = _writeEscaped(out, offset, source.codeUnitAtUnchecked(i), source, i);
   }
   out.write(offset, 0x22);
   return Utf16String.unsafeWrap(out);
 }
 
 /// JSON-escapes [code] into [out] at [offset]; returns the next offset.
-int _writeEscaped(WasmArray<WasmI16> out, int offset, int code) {
+/// [source] and [index] identify the surrounding string so an unpaired
+/// surrogate can be escaped.
+int _writeEscaped(
+  WasmArray<WasmI16> out,
+  int offset,
+  int code,
+  WasmStringImplementation source,
+  int index,
+) {
   switch (code) {
     case 0x22:
       out
@@ -128,6 +140,8 @@ int _writeEscaped(WasmArray<WasmI16> out, int offset, int code) {
     default:
       if (code < 0x20) {
         offset = _writeUnicodeEscape(out, offset, code);
+      } else if (_isUnpairedSurrogateAt(source, index)) {
+        offset = _writeSurrogateEscape(out, offset, code);
       } else {
         out.write(offset++, code);
       }
@@ -158,3 +172,27 @@ int _writeUnicodeEscapeI8(WasmArray<WasmI8> out, int offset, int code) {
 }
 
 int _hexDigit(int value) => value < 10 ? 0x30 + value : 0x57 + value;
+
+/// Whether the code unit at [index] is a surrogate that does not form a
+/// pair, i.e. a low surrogate or a high one not followed by a low one.
+bool _isUnpairedSurrogateAt(WasmStringImplementation source, int index) {
+  final c = source.codeUnitAtUnchecked(index);
+  final isHigh = c >= 0xD800 && c <= 0xDBFF;
+  final isLow = c >= 0xDC00 && c <= 0xDFFF;
+  if (!isHigh && !isLow) return false;
+  if (isLow) return true;
+  final next = index + 1 < source.length ? source.codeUnitAtUnchecked(index + 1) : 0;
+  return !(next >= 0xDC00 && next <= 0xDFFF);
+}
+
+/// Writes `\udXXX` (lowercase hex) for an unpaired surrogate.
+int _writeSurrogateEscape(WasmArray<WasmI16> out, int offset, int code) {
+  out
+    ..write(offset++, 0x5c)
+    ..write(offset++, 0x75)
+    ..write(offset++, _hexDigit((code >> 12) & 0xf))
+    ..write(offset++, _hexDigit((code >> 8) & 0xf))
+    ..write(offset++, _hexDigit((code >> 4) & 0xf))
+    ..write(offset++, _hexDigit(code & 0xf));
+  return offset;
+}

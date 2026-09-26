@@ -20,10 +20,13 @@ void printImpl(WasmStringImplementation string) {
   // without its terminator, so re-add the newline here.
   final message = string.concat(_newline);
 
-  // Encode as UTF-8, reserving an extra byte per code unit for surrogates
-  // expanding to two bytes.
+  // Encode as UTF-8. A surrogate pair becomes one 4-byte sequence; an
+  // unpaired surrogate becomes U+FFFD, matching how the Dart VM encodes
+  // strings for byte output. Reserve enough space: 4 bytes per code unit
+  // covers every case including a pair split across the loop (the pair
+  // writes 4 bytes for 2 units).
   final length = message.length;
-  final bytes = Uint8List(length * 3);
+  final bytes = Uint8List(length * 4);
   var count = 0;
   for (var i = 0; i < length; i++) {
     final unit = message.codeUnitAtUnchecked(i);
@@ -32,6 +35,24 @@ void printImpl(WasmStringImplementation string) {
     } else if (unit < 0x800) {
       bytes[count++] = 0xC0 | (unit >> 6);
       bytes[count++] = 0x80 | (unit & 0x3F);
+    } else if (unit >= 0xD800 && unit <= 0xDBFF) {
+      // High surrogate: combine with a following low surrogate into one
+      // code point, or fall back to U+FFFD for an unpaired one.
+      final next = i + 1 < length ? message.codeUnitAtUnchecked(i + 1) : 0;
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        final codePoint =
+            0x10000 + ((unit - 0xD800) << 10) + (next - 0xDC00);
+        bytes[count++] = 0xF0 | (codePoint >> 18);
+        bytes[count++] = 0x80 | ((codePoint >> 12) & 0x3F);
+        bytes[count++] = 0x80 | ((codePoint >> 6) & 0x3F);
+        bytes[count++] = 0x80 | (codePoint & 0x3F);
+        i++; // The low surrogate is consumed.
+      } else {
+        count = _encodeReplacement(bytes, count);
+      }
+    } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
+      // A low surrogate without a preceding high one.
+      count = _encodeReplacement(bytes, count);
     } else {
       bytes[count++] = 0xE0 | (unit >> 12);
       bytes[count++] = 0x80 | ((unit >> 6) & 0x3F);
@@ -53,6 +74,14 @@ void printImpl(WasmStringImplementation string) {
 }
 
 const _newline = Latin1String.unsafeWrap(WasmArray.literal([10]));
+
+/// Appends the UTF-8 encoding of U+FFFD, used for unpaired surrogates.
+int _encodeReplacement(Uint8List bytes, int count) {
+  bytes[count++] = 0xEF;
+  bytes[count++] = 0xBF;
+  bytes[count++] = 0xBD;
+  return count;
+}
 
 @pragma('wasm:import', 'component.implicitImport_stdoutWriteViaStream')
 external WasmI32 _writeViaStream(WasmI32 stream);
