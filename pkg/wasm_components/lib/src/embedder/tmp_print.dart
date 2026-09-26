@@ -39,7 +39,12 @@ void printImpl(WasmStringImplementation string) {
     }
   }
 
-  final readable = newReadableStream(_U8StreamVtable(), Stream.value(bytes));
+  // Only the first `count` bytes are initialized; the rest of the buffer is
+  // slack for multi-byte encodings.
+  final readable = newReadableStream(
+    _U8StreamVtable(),
+    Stream.value(Uint8List.sublistView(bytes, 0, count)),
+  );
 
   // Hand the readable end to the host via wasi:cli/stdout and wait for the
   // write to complete, so that print statements appear before `run` returns.
