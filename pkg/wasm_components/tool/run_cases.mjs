@@ -558,6 +558,9 @@ function makeComponentRuntime(libc, collector) {
   // running. `canon.waitable-set.new` is only ever called by `spawnTask`, so
   // the most recent set is the task's set.
   let taskSetIndex = null;
+  // Whether the async `invoke-test` export has returned (its `canon
+  // task.return` fired).
+  let taskReturned = false;
 
   function newPair(reader, writer, elementType) {
     reader.t = elementType;
@@ -726,6 +729,7 @@ function makeComponentRuntime(libc, collector) {
 
   function beginTask() {
     taskSetIndex = null;
+    taskReturned = false;
   }
 
   // The guest runs a case inside a task; its event loop is driven through the
@@ -788,6 +792,17 @@ function makeComponentRuntime(libc, collector) {
     // reachable, so the import must exist.
     'canon.subtask.drop': (subtask) => {
       handles.remove(subtask).join(null);
+    },
+
+    // `canon task.return` for the async `invoke-test` export: the generated
+    // wrapper calls it when the task's body has finished. Nothing joins the
+    // exported task, so completing it is all the host has to do; calling it
+    // twice would trap, matching the Canonical ABI.
+    _component_1taskReturn: () => {
+      if (taskReturned) {
+        throw new Error('canon task.return called twice');
+      }
+      taskReturned = true;
     },
 
     // The task/subtask machinery of the runtime uses `future<void>`.

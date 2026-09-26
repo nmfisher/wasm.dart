@@ -63,7 +63,16 @@ i2.WasmI32 _component_0() {
 }
 
 @pragma('wasm:export', r'component_1')
-i2.WasmVoid _component_1(i2.WasmI32 p0) {
-  _unnamedExport1.invokeTest(number: p0.toIntUnsigned());
-  return i2.WasmVoid();
+i2.WasmI32 _component_1(i2.WasmI32 p0) {
+  final asyncExitCode = i1.spawnTask(
+    run: () async {
+      await _unnamedExport1.invokeTest(number: p0.toIntUnsigned());
+      _component_1taskReturn();
+    },
+    debugName: 'invoke-test',
+  );
+  return asyncExitCode.toWasmI32();
 }
+
+@pragma('wasm:import', 'component._component_1taskReturn')
+external i2.WasmVoid _component_1taskReturn();
