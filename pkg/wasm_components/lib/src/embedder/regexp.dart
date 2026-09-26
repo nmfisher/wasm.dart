@@ -2,23 +2,31 @@
 /// imports on top of the custom [WasmStringImplementation] strings.
 ///
 /// The standalone wasm target implements `RegExp` with JavaScript semantics
-/// (ECMAScript `RegExp` over UTF-16 code units): the leftmost match wins, and
-/// among matches at the same start the pattern's preference order (alternatives
-/// first-to-last, greedy by default, lazy after `?`) decides which match is
-/// reported.
+/// (ECMAScript `RegExp`): the leftmost match wins, and among matches at the
+/// same start the pattern's preference order (alternatives first-to-last,
+/// greedy by default, lazy after `?`) decides which match is reported.
 ///
 /// Supported syntax: literals, `.`, escapes (`\d \D \w \W \s \S \b \B \n \r
 /// \t \f \v \0 \cX \xhh \uhhhh \u{...}`, identity escapes, backreferences),
-/// character classes with ranges and negation, quantifiers (`*`, `+`, `?`,
-/// `{n}`, `{n,}`, `{n,m}`, greedy and lazy), groups (`(...)`, `(?:...)`,
-/// `(?<name>...)`), alternation, lookaheads `(?=...)` / `(?!...)`, anchors
-/// `^`/`$`, and the flags `i m s u`.
+/// character classes with ranges, negation, class escapes and the empty
+/// classes `[]` and `[^]`, quantifiers (`*`, `+`, `?`, `{n}`, `{n,}`, `{n,m}`,
+/// greedy and lazy), groups (`(...)`, `(?:...)`, `(?<name>...)`), alternation,
+/// lookaheads `(?=...)` / `(?!...)`, anchors `^`/`$`, and the flags `i m s u`.
+///
+/// With the `u` flag the pattern and the input are matched by code point:
+/// `.` and classes consume whole code points, literal surrogate pairs in the
+/// pattern combine into one atom, and a lone surrogate matches only unpaired
+/// surrogates in the input. Case-insensitive matches canonicalize with the
+/// Unicode simple case folding (`u` flag) or the simple uppercase mapping
+/// guarded to keep non-ASCII characters from folding into ASCII (no `u` flag),
+/// following the ECMAScript `Canonicalize` operation.
 library;
 
 // ignore: import_internal_library
 import 'dart:_wasm';
 
 import 'string.dart';
+import 'unicode_tables.dart';
 
 /// A compiled regular expression.
 final class EmbedderRegexp {
@@ -105,6 +113,18 @@ final class EmbedderRegexp {
   ) {
     final length = string.length;
     if (start < 0 || start > length) return null;
+    if (isUnicode && start > 0 && start < length) {
+      // Matches never start inside a surrogate pair: either back up to the
+      // pair's first code unit (prefix matches) or start after it.
+      final before = string.codeUnitAtUnchecked(start - 1);
+      final here = string.codeUnitAtUnchecked(start);
+      if (_isLeadSurrogate(before) && _isTrailSurrogate(here)) {
+        if (!asPrefix) {
+          return match(string, start + 1, false);
+        }
+        return match(string, start - 1, true);
+      }
+    }
     final limit = asPrefix ? start : length;
     for (var position = start; position <= limit; position++) {
       // Two slots per group (start and end); -1 marks "did not participate",
@@ -119,6 +139,14 @@ final class EmbedderRegexp {
         return EmbedderRegexpMatch(this, string, position, end, captures);
       }
       if (asPrefix) return null;
+      if (isUnicode && position < length) {
+        // Step over a surrogate pair as one code point.
+        final code = string.codeUnitAtUnchecked(position);
+        if (_isLeadSurrogate(code) &&
+            _isTrailSurrogate(string.codeUnitAtUnchecked(position + 1))) {
+          position++;
+        }
+      }
     }
     return null;
   }
@@ -274,11 +302,7 @@ abstract class _RegexpNode {
 
   /// Tries to match at [position]; on success continues with [next] and
   /// returns the end of the whole match, otherwise returns null.
-  int? matchAt(
-    int position,
-    _RegexpMatcher matcher,
-    _MatchContinuation next,
-  );
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next);
 }
 
 /// The rest of the match, chained so backtracking works by construction.
@@ -332,7 +356,7 @@ class _RegexpMatcher {
   final int inputLength;
 
   _RegexpMatcher(this.pattern, this.string, this.captures)
-      : inputLength = string.length;
+    : inputLength = string.length;
 
   /// Matches the whole pattern starting exactly at [position] when [asPrefix]
   /// is set, otherwise finds the leftmost match at or after [position].
@@ -351,7 +375,41 @@ class _RegexpMatcher {
     final actual = string.codeUnitAtUnchecked(position);
     if (actual == code) return true;
     if (pattern.isCaseSensitive) return false;
-    return _foldEquals(actual, code);
+    return _canonicalizeUnit(actual, pattern.isUnicode) ==
+        _canonicalizeUnit(code, pattern.isUnicode);
+  }
+
+  /// Reads the code point at [position] (a whole surrogate pair as one).
+  int codePointAt(int position) {
+    final code = string.codeUnitAtUnchecked(position);
+    if (pattern.isUnicode &&
+        position + 1 < inputLength &&
+        _isLeadSurrogate(code) &&
+        _isTrailSurrogate(string.codeUnitAtUnchecked(position + 1))) {
+      return 0x10000 +
+          ((code - 0xd800) << 10) +
+          (string.codeUnitAtUnchecked(position + 1) - 0xdc00);
+    }
+    return code;
+  }
+
+  /// The number of code units the code point at [position] occupies.
+  int codePointSizeAt(int position) {
+    return codePointAt(position) > 0xFFFF ? 2 : 1;
+  }
+
+  /// The code point just before [position], walking back over a pair.
+  int codePointBefore(int position) {
+    final code = string.codeUnitAtUnchecked(position - 1);
+    if (pattern.isUnicode &&
+        position >= 2 &&
+        _isTrailSurrogate(code) &&
+        _isLeadSurrogate(string.codeUnitAtUnchecked(position - 2))) {
+      return 0x10000 +
+          ((string.codeUnitAtUnchecked(position - 2) - 0xd800) << 10) +
+          (code - 0xdc00);
+    }
+    return code;
   }
 
   bool isWordCharAt(int position) {
@@ -387,10 +445,74 @@ class _RegexpMatcher {
   }
 }
 
-bool _foldEquals(int actual, int expected) {
-  if (actual >= 0x41 && actual <= 0x5a) actual += 0x20;
-  if (expected >= 0x41 && expected <= 0x5a) expected += 0x20;
-  return actual == expected;
+// ---------------------------------------------------------------------------
+// Case canonicalization (ECMAScript `Canonicalize`)
+// ---------------------------------------------------------------------------
+
+bool _isLeadSurrogate(int code) => code >= 0xd800 && code <= 0xdbff;
+
+bool _isTrailSurrogate(int code) => code >= 0xdc00 && code <= 0xdfff;
+
+/// Looks up [code] in the sorted `2 * i` slots of [pairs]; -1 when absent.
+int _lookupPair(WasmArray<WasmI32> pairs, int code) {
+  var low = 0;
+  var high = pairs.length ~/ 2 - 1;
+  while (low <= high) {
+    final mid = (low + high) >> 1;
+    final key = pairs.readSigned(2 * mid);
+    if (key < code) {
+      low = mid + 1;
+    } else if (key > code) {
+      high = mid - 1;
+    } else {
+      return pairs.readSigned(2 * mid + 1);
+    }
+  }
+  return -1;
+}
+
+/// Canonicalizes a single UTF-16 code unit for a case-insensitive match.
+///
+/// With the `u` flag this is the simple/common case folding of the code unit;
+/// without it, the simple uppercase mapping, unless it would move a character
+/// at 128 or above into ASCII (those stay unchanged).
+int _canonicalizeUnit(int code, bool unicode) {
+  if (unicode) {
+    if (code < 0x80) {
+      // ASCII folds to lowercase.
+      if (code >= 0x41 && code <= 0x5a) return code + 0x20;
+      return code;
+    }
+    final folded = _lookupPair(caseFoldPairs, code);
+    return folded >= 0 ? folded : code;
+  }
+  if (code < 0x80) {
+    // Without the flag the mapping is uppercase.
+    if (code >= 0x61 && code <= 0x7a) return code - 0x20;
+    return code;
+  }
+  return _canonicalizeUppercase(code);
+}
+
+/// Canonicalizes a code point (surrogate pairs folded as a whole).
+int _canonicalizeCodePoint(int code, bool unicode) {
+  if (code < 0x80) return _canonicalizeUnit(code, unicode);
+  if (!unicode) return _canonicalizeUppercase(code);
+  if (code > 0xFFFF) {
+    final folded = _lookupPair(caseFoldPairs, code);
+    return folded >= 0 ? folded : code;
+  }
+  return _canonicalizeUnit(code, true);
+}
+
+int _canonicalizeUppercase(int code) {
+  final upper = _lookupPair(simpleUppercasePairs, code);
+  if (upper >= 0) {
+    // Non-ASCII characters never fold into ASCII without the `u` flag.
+    if (code >= 0x80 && upper < 0x80) return code;
+    return upper;
+  }
+  return code;
 }
 
 // ---------------------------------------------------------------------------
@@ -414,10 +536,10 @@ final class _CharNode extends _RegexpNode {
   }
 }
 
-/// A code point above the BMP (`\u{...}` escape or a literal astral
-/// character in unicode mode). Stored as one code point and matched against
-/// the subject's surrogate pair; case-insensitive folding is ASCII-only, so
-/// it does not apply here.
+/// A code point above the BMP (`\u{...}` escape or a literal astral character
+/// in unicode mode). Stored as one code point and matched against the
+/// subject's surrogate pair; case-insensitive folding applies to the code
+/// point as a whole.
 final class _AstralCharNode extends _RegexpNode {
   final int code;
 
@@ -428,27 +550,90 @@ final class _AstralCharNode extends _RegexpNode {
 
   @override
   int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
-    final offset = code - 0x10000;
-    final high = 0xD800 + (offset >> 10);
-    final low = 0xDC00 + (offset & 0x3FF);
-    if (!matcher.codeUnitEqualsAt(position, high)) return null;
-    if (!matcher.codeUnitEqualsAt(position + 1, low)) return null;
-    return next.run(position + 2);
+    if (position + 1 >= matcher.inputLength) return null;
+    final actual = matcher.codePointAt(position);
+    if (actual == code) return next.run(position + 2);
+    if (matcher.pattern.isCaseSensitive) return null;
+    if (_canonicalizeCodePoint(actual, matcher.pattern.isUnicode) ==
+        _canonicalizeCodePoint(code, matcher.pattern.isUnicode)) {
+      return next.run(position + 2);
+    }
+    return null;
   }
 }
 
 /// Builds the node for a parsed code point: astral code points in unicode
-/// mode match the subject's surrogate pair as one atom.
-_RegexpNode _charNodeForCodePoint(int code, bool caseInsensitive, bool unicode) {
+/// mode match the subject's surrogate pair as one atom. Without the flag an
+/// astral code point becomes two independent code-unit atoms.
+_RegexpNode _charNodeForCodePoint(
+  int code,
+  bool caseInsensitive,
+  bool unicode,
+) {
   if (unicode && code > 0xFFFF) return _AstralCharNode(code);
   return _CharNode(code, caseInsensitive);
 }
 
-/// Any code unit except line terminators, unless `s` is set.
+/// A lone trail surrogate escape (`\uDC00`) in unicode mode: it matches an
+/// unpaired trail surrogate only, never the second half of a pair.
+final class _LoneTrailSurrogateNode extends _RegexpNode {
+  final int code;
+
+  _LoneTrailSurrogateNode(this.code);
+
+  @override
+  bool get canMatchEmpty => false;
+
+  @override
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (position >= matcher.inputLength) return null;
+    if (matcher.string.codeUnitAtUnchecked(position) != code) return null;
+    if (position > 0 &&
+        _isLeadSurrogate(matcher.string.codeUnitAtUnchecked(position - 1))) {
+      return null; // second half of a pair
+    }
+    return next.run(position + 1);
+  }
+}
+
+/// A lone lead surrogate (`\uD800` written alone) in unicode mode: it matches
+/// an unpaired lead surrogate only, never the first half of a pair.
+final class _LoneLeadSurrogateNode extends _RegexpNode {
+  final int code;
+
+  _LoneLeadSurrogateNode(this.code);
+
+  @override
+  bool get canMatchEmpty => false;
+
+  @override
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (position >= matcher.inputLength) return null;
+    if (matcher.string.codeUnitAtUnchecked(position) != code) return null;
+    if (position + 1 < matcher.inputLength &&
+        _isTrailSurrogate(matcher.string.codeUnitAtUnchecked(position + 1))) {
+      return null; // first half of a pair
+    }
+    return next.run(position + 1);
+  }
+}
+
+/// Builds the node for a literal code unit read in unicode mode: combines
+/// with a following trail surrogate into one code point.
+_RegexpNode _literalNodeInUnicode(int lead, _RegexpParser parser) {
+  if (!_isLeadSurrogate(lead)) return _CharNode(lead, parser.caseInsensitive);
+  final trail = parser._tryParseTrailSurrogate();
+  if (trail == null) return _LoneLeadSurrogateNode(lead);
+  return _AstralCharNode(0x10000 + ((lead - 0xd800) << 10) + (trail - 0xdc00));
+}
+
+/// Any code point (unicode mode) or code unit (otherwise) except line
+/// terminators, unless `s` is set.
 final class _DotNode extends _RegexpNode {
   final bool dotAll;
+  final bool unicode;
 
-  _DotNode(this.dotAll);
+  _DotNode(this.dotAll, this.unicode);
 
   @override
   bool get canMatchEmpty => false;
@@ -457,6 +642,7 @@ final class _DotNode extends _RegexpNode {
   int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
     if (position >= matcher.inputLength) return null;
     if (!dotAll && matcher.isLineTerminatorAt(position)) return null;
+    if (unicode) return next.run(position + matcher.codePointSizeAt(position));
     return next.run(position + 1);
   }
 }
@@ -476,7 +662,7 @@ final class _AnchorNode extends _RegexpNode {
     if (isDollar) {
       final ok = isMultiLine
           ? position == matcher.inputLength ||
-              matcher.isLineTerminatorAt(position)
+                matcher.isLineTerminatorAt(position)
           : position == matcher.inputLength;
       return ok ? next.run(position) : null;
     }
@@ -505,7 +691,7 @@ final class _WordBoundaryNode extends _RegexpNode {
   }
 }
 
-/// `\d`, `\D`, `\w`, `\W`, `\s` or `\S`.
+/// `\d`, `\D`, `\w`, `\W`, `\s` or `\S`, also inside a character class.
 final class _BuiltinClassNode extends _RegexpNode {
   /// The ASCII code of the escape letter: `d D w W s S`.
   final int kind;
@@ -519,20 +705,28 @@ final class _BuiltinClassNode extends _RegexpNode {
   int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
     if (position >= matcher.inputLength) return null;
     final code = matcher.string.codeUnitAtUnchecked(position);
-    var inside = switch (kind) {
-      0x64 || 0x44 => code >= 0x30 && code <= 0x39,
-      0x77 || 0x57 => code == 0x5f ||
-          (code >= 0x30 && code <= 0x39) ||
-          (code >= 0x41 && code <= 0x5a) ||
-          (code >= 0x61 && code <= 0x7a),
-      0x73 || 0x53 => _isWhitespace(code),
-      _ => false,
-    };
+    var inside = _matchesCodeUnit(code);
+    if (!inside && !matcher.pattern.isCaseSensitive) {
+      // A case-insensitive builtin also accepts a folded form: `[\\w]`/i
+      // matches `ſ` (U+017F), which folds to `s`, without the `u` flag it
+      // does not (non-ASCII never folds into ASCII).
+      final unicode = matcher.pattern.isUnicode;
+      final folded = _canonicalizeUnit(code, unicode);
+      if (folded != code) inside = _matchesCodeUnit(folded);
+    }
     if (kind == 0x44 || kind == 0x57 || kind == 0x53) inside = !inside;
-    return inside ? next.run(position + 1) : null;
+    if (!inside) return null;
+    if (matcher.pattern.isUnicode) {
+      return next.run(position + matcher.codePointSizeAt(position));
+    }
+    return next.run(position + 1);
   }
 
-  static bool _isWhitespace(int code) {
+  bool _matchesCodeUnit(int code) {
+    return _ClassNode._matchesBuiltin(kind, code);
+  }
+
+  static bool isWhitespace(int code) {
     switch (code) {
       case 0x09 || 0x0a || 0x0b || 0x0c || 0x0d || 0x20:
       case 0xa0 || 0x1680:
@@ -545,12 +739,21 @@ final class _BuiltinClassNode extends _RegexpNode {
   }
 }
 
-/// A character class `[...]`: ranges of code units.
+/// A character class `[...]`: ranges of code points (or code units without
+/// the `u` flag), negation, and the builtin class escapes as members.
 final class _ClassNode extends _RegexpNode {
+  /// Inclusive ranges, sorted by start; built by the parser.
   final List<(int, int)> ranges;
+
+  /// Builtin class escapes (`d D w W s S`) that are members.
+  final List<int> builtins;
+
   final bool negated;
 
-  _ClassNode(this.ranges, this.negated);
+  /// Whether members are code points (`u` flag) or code units.
+  final bool unicode;
+
+  _ClassNode(this.ranges, this.builtins, this.negated, this.unicode);
 
   @override
   bool get canMatchEmpty => false;
@@ -558,16 +761,25 @@ final class _ClassNode extends _RegexpNode {
   @override
   int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
     if (position >= matcher.inputLength) return null;
-    final code = matcher.string.codeUnitAtUnchecked(position);
+    final code = unicode
+        ? matcher.codePointAt(position)
+        : matcher.string.codeUnitAtUnchecked(position);
+    // A character is in the member set when the raw form or (for a
+    // case-insensitive pattern) its canonical image is. The parser closed the
+    // range members under their canonical images, so canonicalizing the
+    // input is enough.
     var inside = _contains(code);
     if (!inside && !matcher.pattern.isCaseSensitive) {
-      // Fold the input and retry: covers `[a-z]` against 'A' style cases.
-      final lower = code >= 0x41 && code <= 0x5a ? code + 0x20 : code;
-      final upper = code >= 0x61 && code <= 0x7a ? code - 0x20 : code;
-      inside = (lower != code && _contains(lower)) ||
-          (upper != code && _contains(upper));
+      final canonical = _canonicalize(code);
+      if (canonical != code) inside = _contains(canonical);
     }
-    return inside != negated ? next.run(position + 1) : null;
+    if (!inside) {
+      inside = _matchesBuiltins(code, !matcher.pattern.isCaseSensitive);
+    }
+    if (inside == negated) return null;
+    return next.run(
+      position + (unicode ? matcher.codePointSizeAt(position) : 1),
+    );
   }
 
   bool _contains(int code) {
@@ -577,6 +789,46 @@ final class _ClassNode extends _RegexpNode {
       if (code <= range.$2) return true;
     }
     return false;
+  }
+
+  /// Whether [code] is in the member set of the builtin escapes. `\D` and
+  /// friends negate their own set: `[\D]` is "not a digit". With
+  /// [foldCase] the canonical image of [code] is consulted as well, inside
+  /// the negation: `[\W]`/iu rejects `ſ` because it folds to `s`, a word
+  /// character.
+  bool _matchesBuiltins(int code, bool foldCase) {
+    for (var i = 0; i < builtins.length; i++) {
+      final kind = builtins[i];
+      var member = _matchesBuiltin(kind, code);
+      if (!member && foldCase) {
+        final canonical = _canonicalize(code);
+        if (canonical != code) member = _matchesBuiltin(kind, canonical);
+      }
+      if (kind == 0x44 || kind == 0x57 || kind == 0x53) member = !member;
+      if (member) return true;
+    }
+    return false;
+  }
+
+  int _canonicalize(int code) {
+    return unicode
+        ? _canonicalizeCodePoint(code, true)
+        : _canonicalizeUnit(code, false);
+  }
+
+  /// Whether [code] is in the positive set of the builtin escape [kind]
+  /// (`\D` and friends are negated at their use site, by [negated]).
+  static bool _matchesBuiltin(int kind, int code) {
+    return switch (kind) {
+      0x64 || 0x44 => code >= 0x30 && code <= 0x39,
+      0x77 || 0x57 =>
+        code == 0x5f ||
+            (code >= 0x30 && code <= 0x39) ||
+            (code >= 0x41 && code <= 0x5a) ||
+            (code >= 0x61 && code <= 0x7a),
+      0x73 || 0x53 => _BuiltinClassNode.isWhitespace(code),
+      _ => false,
+    };
   }
 }
 
@@ -623,8 +875,12 @@ final class _GroupNode extends _RegexpNode {
           position,
         );
       default:
-        return _tryAlternatives(alternatives, matcher, _GroupEnd(next),
-            position);
+        return _tryAlternatives(
+          alternatives,
+          matcher,
+          _GroupEnd(next),
+          position,
+        );
     }
   }
 }
@@ -783,8 +1039,8 @@ final class _QuantifierNode extends _RegexpNode {
     this.lazy, [
     this.firstCapture = 0,
     this.captureCount = 0,
-  ])  : assert(min >= 0),
-        assert(max < 0 || max >= min);
+  ]) : assert(min >= 0),
+       assert(max < 0 || max >= min);
 
   @override
   bool get canMatchEmpty => min == 0 || atom.canMatchEmpty;
@@ -792,7 +1048,15 @@ final class _QuantifierNode extends _RegexpNode {
   @override
   int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
     return _repeat(
-      atom, min, max, lazy, firstCapture, captureCount, matcher, next, position,
+      atom,
+      min,
+      max,
+      lazy,
+      firstCapture,
+      captureCount,
+      matcher,
+      next,
+      position,
     );
   }
 }
@@ -818,8 +1082,15 @@ int? _repeatIteration(
     0,
     matcher,
     _RepeatContinue(
-      atom, min, max, lazy, firstCapture, captureCount,
-      matcher, next, position,
+      atom,
+      min,
+      max,
+      lazy,
+      firstCapture,
+      captureCount,
+      matcher,
+      next,
+      position,
     ),
   ).run(position);
   if (result == null) {
@@ -830,11 +1101,7 @@ int? _repeatIteration(
 
 /// Copies the [count] capture slots of the groups [firstCapture] ..
 /// [firstCapture + count - 1] and then marks them unset.
-List<int> _saveCaptures(
-  _RegexpMatcher matcher,
-  int firstCapture,
-  int count,
-) {
+List<int> _saveCaptures(_RegexpMatcher matcher, int firstCapture, int count) {
   final slot = 2 * (firstCapture - 1);
   final saved = List<int>.filled(2 * count, -1);
   for (var i = 0; i < 2 * count; i++) {
@@ -916,14 +1183,28 @@ int? _repeat(
   if (max == 0) return next.run(position);
   if (min != 0) {
     return _repeatIteration(
-      atom, min, max, lazy, firstCapture, captureCount,
-      matcher, next, position,
+      atom,
+      min,
+      max,
+      lazy,
+      firstCapture,
+      captureCount,
+      matcher,
+      next,
+      position,
     );
   }
   if (!lazy) {
     final result = _repeatIteration(
-      atom, min, max, lazy, firstCapture, captureCount,
-      matcher, next, position,
+      atom,
+      min,
+      max,
+      lazy,
+      firstCapture,
+      captureCount,
+      matcher,
+      next,
+      position,
     );
     if (result != null) return result;
     return next.run(position);
@@ -931,8 +1212,15 @@ int? _repeat(
   final result = next.run(position);
   if (result != null) return result;
   return _repeatIteration(
-    atom, min, max, lazy, firstCapture, captureCount,
-    matcher, next, position,
+    atom,
+    min,
+    max,
+    lazy,
+    firstCapture,
+    captureCount,
+    matcher,
+    next,
+    position,
   );
 }
 
@@ -950,8 +1238,25 @@ final class _BackreferenceNode extends _RegexpNode {
     final begin = matcher.captures.readSigned(2 * (groupIndex - 1));
     if (begin < 0) return next.run(position); // unset: matches empty
     final finish = matcher.captures.readSigned(2 * (groupIndex - 1) + 1);
+    final unicode = matcher.pattern.isUnicode;
     var offset = position;
-    for (var i = begin; i < finish; i++) {
+    var i = begin;
+    while (i < finish) {
+      if (unicode && _isLeadSurrogate(matcher.string.codeUnitAtUnchecked(i))) {
+        // Compare and consume a whole code point on both sides.
+        if (offset + 1 >= matcher.inputLength) return null;
+        final expected = matcher.codePointAt(i);
+        final actual = matcher.codePointAt(offset);
+        if (matcher.pattern.isCaseSensitive) {
+          if (expected != actual) return null;
+        } else if (_canonicalizeCodePoint(actual, true) !=
+            _canonicalizeCodePoint(expected, true)) {
+          return null;
+        }
+        offset += 2;
+        i += 2;
+        continue;
+      }
       if (!matcher.codeUnitEqualsAt(
         offset,
         matcher.string.codeUnitAtUnchecked(i),
@@ -959,6 +1264,7 @@ final class _BackreferenceNode extends _RegexpNode {
         return null;
       }
       offset++;
+      i++;
     }
     return next.run(offset);
   }
@@ -967,6 +1273,13 @@ final class _BackreferenceNode extends _RegexpNode {
 // ---------------------------------------------------------------------------
 // Parser
 // ---------------------------------------------------------------------------
+
+/// A builtin class escape (`\d` and friends) parsed as a class member; it
+/// cannot be a range endpoint.
+final class _ClassEscape {
+  final int code;
+  const _ClassEscape(this.code);
+}
 
 class _RegexpParser {
   final String source;
@@ -1037,12 +1350,22 @@ class _RegexpParser {
     final firstCapture = range == null ? 0 : range.$1;
     final captureCount = range == null ? 0 : range.$2 - range.$1 + 1;
     var node = _QuantifierNode(
-      atom, quantifier.$1, quantifier.$2, false, firstCapture, captureCount,
+      atom,
+      quantifier.$1,
+      quantifier.$2,
+      false,
+      firstCapture,
+      captureCount,
     );
     if (peek() == 0x3f) {
       position++;
       node = _QuantifierNode(
-        atom, quantifier.$1, quantifier.$2, true, firstCapture, captureCount,
+        atom,
+        quantifier.$1,
+        quantifier.$2,
+        true,
+        firstCapture,
+        captureCount,
       );
     }
     return node;
@@ -1129,7 +1452,7 @@ class _RegexpParser {
         return parseClass();
       case 0x2e: // .
         position++;
-        return _DotNode(dotAll);
+        return _DotNode(dotAll, unicode);
       case 0x2a || 0x2b || 0x3f: // * + ?
         fail('Nothing to repeat');
       case 0x7b: // `{` — a quantifier without an atom, or a literal brace
@@ -1143,6 +1466,7 @@ class _RegexpParser {
         fail('Unexpected end of pattern');
     }
     final code = next();
+    if (unicode) return _literalNodeInUnicode(code, this);
     return _charNodeForCodePoint(code, caseInsensitive, unicode);
   }
 
@@ -1248,7 +1572,6 @@ class _RegexpParser {
       case 0x76:
         return _CharNode(0x0b, caseInsensitive);
       case 0x64 || 0x44 || 0x77 || 0x57 || 0x73 || 0x53:
-        if (inClass) fail('Class escapes in classes are not supported yet');
         return _BuiltinClassNode(code);
       case 0x30:
         if (peek() >= 0x30 && peek() <= 0x39) {
@@ -1265,7 +1588,7 @@ class _RegexpParser {
       case 0x78:
         return _charNodeForCodePoint(readHex(2), caseInsensitive, unicode);
       case 0x75:
-        return parseUnicodeEscape();
+        return _parseUnicodeEscapeAtom();
       default:
         if (code >= 0x31 && code <= 0x39) {
           if (inClass) fail('Invalid class escape');
@@ -1275,6 +1598,71 @@ class _RegexpParser {
         }
         return _CharNode(code, caseInsensitive);
     }
+  }
+
+  /// Parses a `\uXXXX` or `\u{...}` escape as an atom, combining an escaped
+  /// surrogate pair into one code point in unicode mode.
+  _RegexpNode _parseUnicodeEscapeAtom() {
+    final value = _parseUnicodeEscapeValue();
+    if (unicode && _isLeadSurrogate(value)) {
+      // `\uD800\uDC00` (or a literal trail unit) is one code point.
+      final saved = position;
+      final trail = _tryParseTrailSurrogate();
+      if (trail != null) {
+        return _AstralCharNode(
+          0x10000 + ((value - 0xd800) << 10) + (trail - 0xdc00),
+        );
+      }
+      position = saved;
+      // A lone lead surrogate matches only an unpaired one in the input.
+      return _LoneLeadSurrogateNode(value);
+    }
+    if (unicode && _isTrailSurrogate(value)) {
+      return _LoneTrailSurrogateNode(value);
+    }
+    return _charNodeForCodePoint(value, caseInsensitive, unicode);
+  }
+
+  /// Parses the value of a `\uXXXX` or `\u{...}` escape.
+  int _parseUnicodeEscapeValue() {
+    if (peek() == 0x7b) {
+      if (!unicode) fail('Invalid unicode escape');
+      position++;
+      var value = 0;
+      var any = false;
+      while (peek() != 0x7d && !atEnd) {
+        value = value * 16 + hexValue(next());
+        any = true;
+        if (value > 0x10FFFF) fail('Invalid unicode escape');
+      }
+      if (!any || atEnd) fail('Invalid unicode escape');
+      position++; // `}`
+      return value;
+    }
+    return readHex(4);
+  }
+
+  /// Parses a trailing surrogate, either escaped (`\uDC00`) or literal, right
+  /// after a lead surrogate escape; null when the next input is not one.
+  int? _tryParseTrailSurrogate() {
+    if (atEnd) return null;
+    final code = peek();
+    if (code == 0x5c) {
+      if (position + 1 < source.length &&
+          source.codeUnitAt(position + 1) == 0x75) {
+        final saved = position;
+        position += 2;
+        final value = _parseUnicodeEscapeValue();
+        if (_isTrailSurrogate(value)) return value;
+        position = saved;
+      }
+      return null;
+    }
+    if (_isTrailSurrogate(code)) {
+      position++;
+      return code;
+    }
+    return null;
   }
 
   int readBackreference(int firstDigit) {
@@ -1314,24 +1702,118 @@ class _RegexpParser {
       negated = true;
     }
     final ranges = <(int, int)>[];
-    var first = true;
-    while (peek() != 0x5d || first) {
+    final builtins = <int>[];
+    while (peek() != 0x5d) {
       if (atEnd) fail('Unterminated character class');
-      first = false;
-      parseClassAtom(ranges);
+      _parseClassMember(ranges, builtins);
     }
     position++; // `]`
+    if (caseInsensitive && ranges.isNotEmpty) {
+      // Close the set under the members' canonical images, so that matching
+      // only has to canonicalize the input: for every range, add the images
+      // of the code points the case tables map (bounded by the table size,
+      // not the range length; identities are already present).
+      final extra = <(int, int)>[];
+      for (final range in ranges) {
+        _addCaseImages(range.$1, range.$2, unicode, extra);
+      }
+      ranges.addAll(extra);
+    }
     ranges.sort((a, b) => a.$1.compareTo(b.$1));
-    return _ClassNode(ranges, negated);
+    // An empty class `[]` matches nothing; a negated empty class `[^]`
+    // matches any code point (unit). `_ClassNode` handles both through the
+    // (possibly empty) [ranges].
+    return _ClassNode(ranges, builtins, negated, unicode);
   }
 
-  void parseClassAtom(List<(int, int)> ranges) {
-    final startCode = parseClassAtomCode();
-    if (peek() == 0x2d &&
+  /// Adds to [extra] the canonical images of every code point in `[lo, hi]`
+  /// that the case tables map (with the [unicode] mode's canonicalization).
+  /// Identity images are already covered by the range itself.
+  static void _addCaseImages(
+    int lo,
+    int hi,
+    bool unicode,
+    List<(int, int)> extra,
+  ) {
+    final pairs = unicode ? caseFoldPairs : simpleUppercasePairs;
+    final entries = pairs.length ~/ 2;
+    // Binary-search the first table entry at or above `lo`.
+    var low = 0;
+    var high = entries - 1;
+    var first = entries;
+    while (low <= high) {
+      final mid = (low + high) >> 1;
+      final key = pairs.readSigned(2 * mid);
+      if (key < lo) {
+        low = mid + 1;
+      } else {
+        first = mid;
+        high = mid - 1;
+      }
+    }
+    for (var i = first; i < entries; i++) {
+      final source = pairs.readSigned(2 * i);
+      if (source > hi) break;
+      final image = pairs.readSigned(2 * i + 1);
+      // The run-time canonicalization applies the same guard as matching.
+      final mapped = unicode
+          ? image
+          : (source >= 0x80 && image < 0x80 ? source : image);
+      if (mapped != source) extra.add((mapped, mapped));
+    }
+  }
+
+  void _parseClassMember(List<(int, int)> ranges, List<int> builtins) {
+    final start = _parseClassAtom();
+    var dashNext =
+        peek() == 0x2d &&
         position + 1 < source.length &&
-        source.codeUnitAt(position + 1) != 0x5d) {
+        source.codeUnitAt(position + 1) != 0x5d;
+    if (start is _ClassEscape) {
+      if (unicode && dashNext) fail('Invalid character class');
+      builtins.add(start.code);
+      // Annex B: the `-` after a class escape is a literal, and the members
+      // after it are parsed fresh (`[\d-x-z]` is `\d`, `-`, then `x-z`).
+      _consumeLiteralDash(ranges);
+      return;
+    }
+    var startCode = start as int;
+    if (unicode && _isLeadSurrogate(startCode)) {
+      // A lead surrogate combines with the next code unit (literal or
+      // escaped) into one code point member.
+      final saved = position;
+      final trail = _tryParseTrailSurrogate();
+      if (trail != null) {
+        startCode = 0x10000 + ((startCode - 0xd800) << 10) + (trail - 0xdc00);
+      } else {
+        position = saved;
+      }
+      // The dash of a range follows the combined code point, not the lead
+      // surrogate alone (`[\uD835\uDCB0-\uD835\uDCBF]` is one astral range).
+      dashNext =
+          peek() == 0x2d &&
+          position + 1 < source.length &&
+          source.codeUnitAt(position + 1) != 0x5d;
+    }
+    if (dashNext) {
       position++; // `-`
-      final endCode = parseClassAtomCode();
+      final end = _parseClassAtom();
+      if (end is _ClassEscape) {
+        // Annex B: `[a-\d]` is `a`, `-`, `\d` rather than a range.
+        if (unicode) fail('Invalid character class');
+        builtins.add(end.code);
+        ranges.add((startCode, startCode));
+        ranges.add((0x2d, 0x2d));
+        return;
+      }
+      var endCode = end as int;
+      if (unicode && _isLeadSurrogate(endCode)) {
+        // The range end combines with its trail surrogate too.
+        final trail = _tryParseTrailSurrogate();
+        if (trail != null) {
+          endCode = 0x10000 + ((endCode - 0xd800) << 10) + (trail - 0xdc00);
+        }
+      }
       if (endCode < startCode) fail('Range out of order in character class');
       ranges.add((startCode, endCode));
     } else {
@@ -1339,7 +1821,19 @@ class _RegexpParser {
     }
   }
 
-  int parseClassAtomCode() {
+  /// Annex B: after a class escape the `-` is a literal member.
+  void _consumeLiteralDash(List<(int, int)> ranges) {
+    if (peek() == 0x2d &&
+        position + 1 < source.length &&
+        source.codeUnitAt(position + 1) != 0x5d) {
+      position++;
+      ranges.add((0x2d, 0x2d));
+    }
+  }
+
+  /// A parsed class atom: a code point, or a builtin class escape (`\d` and
+  /// friends) which cannot form a range.
+  Object _parseClassAtom() {
     final code = next();
     if (code != 0x5c) return code;
     if (atEnd) fail('\\ at end of pattern');
@@ -1388,7 +1882,7 @@ class _RegexpParser {
         }
         return readHex(4);
       case 0x64 || 0x44 || 0x77 || 0x57 || 0x73 || 0x53:
-        fail('Class escapes in classes are not supported yet');
+        return _ClassEscape(escaped);
       default:
         return escaped;
     }
@@ -1408,5 +1902,13 @@ class _RegexpParser {
     if (code >= 0x41 && code <= 0x46) return code - 0x37;
     if (code >= 0x61 && code <= 0x66) return code - 0x57;
     fail('Invalid hexadecimal escape');
+  }
+
+  /// [hexValue] without failing: -1 for a non-hexadecimal code unit.
+  int hexValueOr(int code) {
+    if (code >= 0x30 && code <= 0x39) return code - 0x30;
+    if (code >= 0x41 && code <= 0x46) return code - 0x37;
+    if (code >= 0x61 && code <= 0x66) return code - 0x57;
+    return -1;
   }
 }
