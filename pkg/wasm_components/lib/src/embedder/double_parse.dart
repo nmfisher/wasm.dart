@@ -80,13 +80,22 @@ DoubleParseResult tryParseDouble(WasmStringImplementation source) {
     // does '1.e5'). With nothing at all after the dot ('1.5.'), the
     // trailing '.' can not start a new number, so the whole-string check
     // below rejects it. Back up only when no digits and no exponent follow,
-    // i.e. when the dot is the last character of a *valid* number prefix.
-    if (fracDigits == 0 &&
-        index < length &&
-        source.codeUnitAtUnchecked(index) != 0x65 &&
-        source.codeUnitAtUnchecked(index) != 0x45) {
-      // Something follows that cannot continue the number: fail.
-      return const DoubleParseFailure();
+    // i.e. when the dot is the last character of a *valid* number prefix:
+    // either the end of input or trailing whitespace.
+    if (fracDigits == 0 && index < length) {
+      final next = source.codeUnitAtUnchecked(index);
+      final isExponent = next == 0x65 || next == 0x45;
+      // Whitespace after the dot ends the number ('1. ' parses as 1.0).
+      var whitespaceEnd = index;
+      while (whitespaceEnd < length &&
+          _isWhitespace(source.codeUnitAtUnchecked(whitespaceEnd))) {
+        whitespaceEnd++;
+      }
+      final onlyWhitespaceFollows = whitespaceEnd == length;
+      if (!isExponent && !onlyWhitespaceFollows) {
+        // Something follows that cannot continue the number: fail.
+        return const DoubleParseFailure();
+      }
     }
   } else if (intDigits == 0) {
     // No digits at all.
@@ -118,13 +127,20 @@ DoubleParseResult tryParseDouble(WasmStringImplementation source) {
         // remaining text fails the "whole string" requirement.
         return const DoubleParseFailure();
       }
+      // Leading zeros do not change the exponent's value, so skip them
+      // before deciding whether it is too large to compute exactly.
+      var firstSignificant = eDigitsStart;
+      while (firstSignificant < eIndex - 1 &&
+          source.codeUnitAtUnchecked(firstSignificant) == 0x30) {
+        firstSignificant++;
+      }
       exponent = _parseSmallInt(
         source,
-        eDigitsStart,
+        firstSignificant,
         eIndex,
         eNegative,
       );
-      explicitExponentDigits = eIndex - eDigitsStart;
+      explicitExponentDigits = eIndex - firstSignificant;
       index = eIndex;
     }
   }
@@ -217,8 +233,9 @@ int _parseSmallInt(
     if (value < 0x10000000) {
       value = value * 10 + digit;
     } else {
-      // Saturate; the magnitude clamping handles the rest.
-      value = negative ? -0x7fffffff : 0x7fffffff;
+      // Saturate; the magnitude clamping handles the rest. Saturate to a
+      // positive magnitude and apply the sign once, at the end.
+      value = 0x7fffffff;
     }
   }
   return negative ? -value : value;
