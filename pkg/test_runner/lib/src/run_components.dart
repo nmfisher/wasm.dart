@@ -1,5 +1,6 @@
 import 'components/wasmdart_tests.dart';
 import 'components/wasmdart_tests_root.dart';
+import 'package:wasm_components/wasm_components.dart';
 import 'testcase.dart';
 
 void defineTests(List<TestCase> cases) {
@@ -38,6 +39,14 @@ final class _ExportTestModule(final List<TestCase> cases, RootImports imports)
 
   @override
   void invokeTest({required int number}) {
-    cases[number](_collector);
+    // A test case is an async-lifted export in its own right: it runs inside
+    // a task so that Dart-level async work (streams and futures backed by
+    // component-model waitables) can make progress. `print` in particular
+    // lowers to a `wasi:cli/stdout` write that completes asynchronously, and
+    // without a task there is no event loop to drive it.
+    spawnTask(
+      debugName: 'invoke-test',
+      run: () => cases[number](_collector),
+    );
   }
 }
