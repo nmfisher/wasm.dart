@@ -166,7 +166,10 @@ Latin1String doubleToFixed(double value, int fractionDigits) {
   final text = scaled.toString();
   final intDigits = text.length - fractionDigits;
   String result;
-  if (intDigits > 0) {
+  if (fractionDigits == 0) {
+    // No fraction digits: no decimal point either (JS `toFixed(0)`).
+    result = text;
+  } else if (intDigits > 0) {
     result = '${text.substring(0, intDigits)}.${text.substring(intDigits)}';
   } else {
     // |value| < 1: leading fraction zeros.
