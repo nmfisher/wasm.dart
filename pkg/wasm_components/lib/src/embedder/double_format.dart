@@ -255,44 +255,71 @@ double decimalFractionToDouble(BigInt mantissa, int shift) {
   } else {
     denominator *= _pow10(-shift);
   }
+  if (numerator == BigInt.zero) return 0.0;
 
-  // Normalize to value = m * 2^-1074 with m integral: multiply by 2^1074,
-  // then divide out the decimal denominator.
-  final significand = _roundHalfEven(
-    numerator << 1074,
-    denominator,
-  );
-  if (significand == BigInt.zero) {
-    return 0.0;
+  // The value is numerator/denominator; find e with 2^e <= value < 2^(e+1).
+  // bitLength gives an estimate within one; the comparisons correct it.
+  var e = numerator.bitLength - denominator.bitLength;
+  while (_compareWithPow2(numerator, denominator, e) < 0) {
+    e--;
+  }
+  while (_compareWithPow2(numerator, denominator, e + 1) >= 0) {
+    e++;
   }
 
-  // significand = value * 2^1074. The double itself is the 53-bit rounding
-  // of this number (with ties to even, as a correct decimal parser rounds).
-  var m = significand;
-  var length = m.bitLength;
-  if (length > 53) {
-    m = _roundHalfEven(m, BigInt.one << (length - 53));
-    if (m.bitLength > 53) {
-      // Rounding carried into the next binade (e.g. 0.999... -> 1.0).
-      m >>= 1;
-      length++;
+  if (e < -1022) {
+    // Subnormal range: the target granularity is 2^-1074, so a *single*
+    // rounding of value * 2^1074 to an integer is the correctly rounded
+    // result. Rounding to 53 bits first and to 2^-1074 after (or the other
+    // way round) can round twice and miss.
+    final m = _roundHalfEven(numerator << 1074, denominator);
+    if (m == BigInt.zero) return 0.0;
+    // Rounding can carry exactly onto the smallest normal, never past it.
+    if (m.bitLength > 52) {
+      return _bitsToDouble(0x0010000000000000);
     }
+    return _bitsToDouble(_bigToInt(m));
   }
-  if (length > 53) {
-    // Normal: m is the 53-bit significand of
-    // value = m * 2^(length - 53 - 1074) = 1.f * 2^(length - 1075).
-    final biased = length - 1075 + 1023;
-    if (biased >= 0x7ff) {
-      // Overflow: the value is larger than the largest finite double.
-      return double.infinity;
-    }
-    return _bitsToDouble(
-      (biased << 52) | _bigToInt(m - (BigInt.one << 52)),
-    );
+
+  // Normal range: round value * 2^(52 - e) to an integer; that integer is
+  // the 53-bit significand, again with a single rounding. The scaled value
+  // lies in [2^52, 2^53), so the result is either a 53-bit number or
+  // exactly 2^53 (a carry into the next binade).
+  final scale = 52 - e;
+  final scaledNumerator =
+      scale >= 0 ? numerator << scale : numerator;
+  final scaledDenominator =
+      scale >= 0 ? denominator : denominator << -scale;
+  var m = _roundHalfEven(scaledNumerator, scaledDenominator);
+  var exponent = e;
+  if (m.bitLength == 54) {
+    // The scaled value was in [2^53, 2^54): only reachable when the
+    // estimate's correction above moved e; re-derive from the carry.
+    m >>= 1;
+    exponent = e + 1;
+  } else if (m == BigInt.one << 53) {
+    // Rounded up onto the next power of two: significand 1.0, binade e+1.
+    exponent = e + 1;
   }
-  // Subnormal: value = m * 2^-1074 with m < 2^52; the significand is the
-  // fraction field itself.
-  return _bitsToDouble(_bigToInt(m));
+  final biased = exponent + 1023;
+  if (biased >= 0x7ff) {
+    // Overflow: the value is larger than the largest finite double.
+    return double.infinity;
+  }
+  return _bitsToDouble((biased << 52) | _bigToInt(m - (BigInt.one << 52)));
+}
+
+/// Compares `numerator / denominator` with 2^[power]: -1, 0 or 1.
+int _compareWithPow2(BigInt numerator, BigInt denominator, int power) {
+  final BigInt left, right;
+  if (power >= 0) {
+    left = numerator;
+    right = denominator << power;
+  } else {
+    left = numerator << -power;
+    right = denominator;
+  }
+  return left.compareTo(right);
 }
 
 /// `numerator ~/ denominator`, rounded to the nearest integer, ties to even.
