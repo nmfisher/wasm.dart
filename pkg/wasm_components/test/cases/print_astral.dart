@@ -1,5 +1,3 @@
-import 'dart:convert' show jsonEncode;
-
 import 'package:test_runner/test_runner.dart';
 
 void main() {
@@ -7,12 +5,12 @@ void main() {
 }
 
 void _repro(BaseResultCollector collector) {
-  // Lone surrogates must be escaped like dart:convert does (the VM is the
-  // golden oracle for this suite).
-  collector.recordString(e: jsonEncode('\uD800'));
-  collector.recordString(e: jsonEncode('\uDC00'));
-  collector.recordString(e: jsonEncode('a\uD800b'));
-  collector.recordString(e: jsonEncode('\u{1F600}'));
-  collector.recordString(e: jsonEncode('\u2028\u2029'));
-  collector.recordString(e: jsonEncode('\x7f'));
+  // Surrogate pairs must encode as one 4-byte UTF-8 sequence, and unpaired
+  // surrogates as U+FFFD, so printed astral characters survive the byte
+  // round-trip through stdout.
+  print('emoji: \u{1F600}');
+  print('supplementary: \u{10400}\u{1D11E}');
+  print('unpaired high: \uD800');
+  print('unpaired low: \uDC00');
+  print('mixed: a\u{1F600}b\uD800c');
 }

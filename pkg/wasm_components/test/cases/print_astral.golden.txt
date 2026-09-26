@@ -1,8 +1,7 @@
 {"type":"start","test":0}
-{"type":"string","value":"\"\\ud800\""}
-{"type":"string","value":"\"\\udc00\""}
-{"type":"string","value":"\"a\\ud800b\""}
-{"type":"string","value":"\"😀\""}
-{"type":"string","value":"\"  \""}
-{"type":"string","value":"\"\""}
+emoji: 😀
+supplementary: 𐐀𝄞
+unpaired high: �
+unpaired low: �
+mixed: a😀b�c
 {"type":"end","test":0}
