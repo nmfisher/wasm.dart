@@ -15,6 +15,10 @@
 - No test or golden file was modified.
 - Nothing was fixed: none of the four root causes is clearly caused by the SDK bump, so per
   the task rules they are reported and left alone.
+- **Follow-up:** causes A and B have since been fixed, taking the wasmtime-backed suite from
+  10/20 to **15/20**. Two of the three remaining `double_parse*` failures turned out to be
+  masking a further, unrelated cause (E, the `test_runner` host's f64 rendering). See
+  [Follow-up: causes A and B fixed](#follow-up-causes-a-and-b-fixed--1520) at the end.
 
 ## Environment
 
@@ -389,3 +393,266 @@ Commit SHA: see the output of the commit step (also printed at the end of the se
 | `/tmp/suite-wasm_tools.log` | `dart test` for `pkg/wasm_tools` |
 | `/tmp/printchk.log` | compile of `test/cases/print.dart` to a component |
 | `/tmp/print-tr.log` | `test_runner` on that component |
+
+## Follow-up: causes A and B fixed — 15/20
+
+Both causes were diagnosed and fixed after the findings above were written. Those findings
+stand unchanged; the pass counts here supersede them. Causes C and D are untouched.
+
+```
+Branch: asb/dart-imports-sdk314
+dart      3.14.0-edge.e7112ac2438cd4f5ac0c832c27ce75bb10b02420 (main)
+wasmtime  47.0.4
+```
+
+### Fix 1 — cause A: `dart_free` on a zero-size allocation
+
+`pkg/runtime_helpers/src/memory.rs` — `dart_free` now returns immediately when
+`num_bytes == 0`, mirroring the guard `dart_realloc` already had on its allocate path:
+
+```rust
+pub extern "C" fn dart_free(ptr: *mut u8, num_bytes: usize, align: usize) {
+    // Talc requires a nonzero layout: it documents on `grow`/`shrink` that the
+    // caller must ensure the size is greater than zero, and a zero-size
+    // `dealloc` sends it a dangling pointer (see `dart_realloc`, which returns
+    // `align` for exactly this case). Zero-size blocks were never really
+    // allocated, so there is nothing to hand back.
+    if num_bytes == 0 {
+        return;
+    }
+    unsafe { dealloc(ptr, Layout::from_size_align_unchecked(num_bytes, align)) }
+}
+```
+
+**Every caller checked.** `grep -rn "dartFree\|dart_free"` over `pkg/` finds the import
+declaration (`pkg/wasm_components/lib/src/embedder/libc.dart:21`), the Rust export, the
+Node host's no-op (`tool/run_cases.mjs:933`), and these call sites:
+
+| caller | size argument | can be 0? |
+|---|---|---|
+| `pkg/wasm_components/lib/src/runtime/string.dart:15` | `2 * packedLength` | **yes** — empty string (the crash above) |
+| `pkg/wasm_components/lib/src/embedder/tmp_print.dart:103` (`freeBuffer`) | runtime `totalSize` | **yes** — zero bytes buffered |
+| `pkg/wasm_components/lib/src/embedder/clock.dart:37` | `const WasmI32(16)` | no |
+| `pkg/wasm_components/lib/src/embedder/tmp_print.dart:220` | `const WasmI32(2)` | no |
+| generated `freeBuffer`, template `pkg/wit_bindgen_dart/src/bindgen.rs:189` | `totalSize * size` | **yes** — empty list |
+| generated sites: `pkg/wit_bindgen_dart/src/functions.rs:1072`, `:1170`, `src/call_async.rs:42` | generated sizes | **yes** for list-backed ones |
+| committed generated files (`pkg/wasi/lib/src/components/*.dart`, `pkg/wasm_tools/example/greeting/...`) | mostly `const WasmI32(n)` struct sizes; list-backed sites use the runtime form | **yes** for the list-backed ones |
+
+Every caller that can pass a zero size reaches it the same way: the matching allocation went
+through `mallocAligned` → `dart_realloc(0, 0, align, 0)`, which returns `align` as a dangling
+pointer. So `dart_free` was handing talc a zero-size layout and a dangling pointer. The guard
+fixes all of them at once; no call site needed changing.
+
+**Unit test** — new `#[cfg(test)] mod tests` in `memory.rs`:
+
+```
+$ cargo test --target x86_64-unknown-linux-gnu
+running 2 tests
+test memory::tests::dart_free_ignores_zero_size_blocks ... ok
+test memory::tests::dart_free_still_frees_nonzero_blocks ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+`dart_free_ignores_zero_size_blocks` installs a test-only `#[global_allocator]` that counts
+`dealloc` calls, so it fails if a zero-size free ever *reaches* the allocator, not merely if it
+happens not to crash. With the guard removed the test binary segfaults — the same fault
+`test_runner` hit at `0xfffffffe`. `dart_free_still_frees_nonzero_blocks` guards against the
+opposite regression (a free that never frees).
+
+`runtime_helpers.wasm` was rebuilt with the fix
+(`pkg/wasm_tools/tool/build_runtime_helpers.sh`, exit 0; asset now 20579 bytes).
+
+### Fix 2 — cause B: the component dropped the SDK's eager static initializers
+
+**The diagnosis above is not the root cause.** Nothing is wrong with `Utf16String`'s stored
+length, the `WasmArray<WasmI16>` behind it, or `stringLength` / `stringCodeUnitAt`. The trap
+happens on a string the embedder builds itself, before any length crosses the component
+boundary — and at index 0.
+
+**Repro.** `String.fromCharCode(0x41)` traps on its own:
+
+```
+wasm trap: out of bounds array access
+  EmbedderStringImpl.fromCodePoint   (sdk/.../wasm/standalone/embedder_string.dart)
+  String.fromCharCode
+```
+
+`fromCodePoint` writes into a static buffer before anything else:
+
+```dart
+@pragma("wasm:initialize-at-startup")
+static final _stringFromCodePointBuffer = WasmArray<WasmI16>(2);
+
+static EmbedderStringImpl fromCodePoint(int codePoint) {
+  final array = _stringFromCodePointBuffer;
+  array.write(0, codePoint);            // ← traps here, at index 0
+  ...
+}
+```
+
+**Why index 0 traps.** The initializer is not a constant expression, so dart2wasm puts the
+field on its *eager* path — the array is allocated in the **module's start function**
+(`pkg/dart2wasm/lib/globals.dart:167-186`, `EagerStaticFieldInitializerCodeGenerator`
+`.generate(module.startFunction.body, …)`; `_initializeAtStartup` defaults to `true`). Until
+that runs, the field holds the *dummy value* dart2wasm uses for a non-nullable reference
+global — a **zero-length** array. In the compiled component:
+
+```wat
+(global $EmbedderStringImpl._stringFromCodePointBuffer (mut (ref $Array<WasmI16>))
+  global.get 775)
+(global (;775;) (ref $Array<WasmI16>) array.new_fixed $Array<WasmI16> 0)   ;; ← length 0
+```
+
+`array.write(0, …)` on a length-0 array is exactly the observed "out of bounds array access",
+even at index 0. No length is wrong anywhere; the array is genuinely empty.
+
+**Root cause.** The start function is replaced during the dart2wasm → component transform and
+the SDK's static initializers are lost. The raw dart2wasm module has
+`(start $"#func852 #init")`, and `#init` contains
+`global.set $EmbedderStringImpl._stringFromCodePointBuffer`. In the component the start
+section points at a *new* `$_start` whose body is only
+
+```wat
+(func $_start (type 302)
+  i32.const 0
+  array.new_default $Array<externref>
+  call $_invokeMain)
+```
+
+`#init` survives as dead code, referenced by nothing. The transform's
+`_runMainOnInstantiation` (`pkg/wasm_tools/lib/src/compiler/transform.dart:253-295`) does
+handle an existing start — it appends `invokeMain` before the trailing `End` — so it took the
+`existingStart == null` branch.
+
+It took that branch because `ModuleTransformer.fromBytes` deserialises the module, and
+deserialisation never sets `module.start`. In
+`pkg/wasm_tools/lib/src/third_party/wasm_builder/src/ir/module.dart` the field is shadowed by
+a parameter of the same name:
+
+```dart
+BaseFunction? start;                 // line 27
+void initialize(
+  ...
+  BaseFunction? start,               // shadows the field
+  ...
+) {
+  ...
+  start = start;                     // line 65 — assigns the parameter to itself
+```
+
+The field stays `null` for **any** module with a start section, on the deserialise path and on
+the `ModuleBuilder.forceBuild()` path, which passes `_startFunction` into the same method.
+`StartSection.deserialize` is fine — `functions[852]` does resolve to `#init`; the value is
+simply never stored. Verified directly: before the fix, deserialising the raw module and
+printing `module.start` gives `null`; after, it gives `#init`.
+
+**Fix.** One line:
+
+```diff
+-    start = start;
++    this.start = start;
+```
+
+This restores the SDK's contract — a module's start function runs at instantiation, so eager
+statics are initialised before any exported function is called — instead of papering over the
+missing initialisation in the embedder. No bounds check, no `try`/`catch`, no lazily
+re-initialising the field on the Dart side. After the fix the component's start function is
+`#init` followed by the `invokeMain` call, as intended.
+
+**Strings affected.** Anything whose construction reaches an SDK static that dart2wasm
+initialises eagerly: concretely `String.fromCharCode`, `String.fromCodePoint` and
+`EmbedderStringImpl.operator[]` (which calls `fromCharCode`). `stringFromCharCodeArray` takes
+a different path, which is why `string_from_char_codes` passed tests 0-3 above; the double
+cases failed because their formatter indexes result strings. The same missing start function
+also left `$_deletedDataMarker` uninitialised — every eager static is restored by this one fix.
+
+### Cause E — a further, unrelated failure that A and B were masking
+
+`double_parse` no longer traps, but it still fails, now on a *different* assertion. Its
+`_tryParseExponents` test records a **double**, and the `test_runner` host renders that f64
+itself:
+
+| `double.tryParse(...)` | golden | `test_runner` output |
+|---|---|---|
+| `'1e-3'` | `0.001` | `0.001` ✓ |
+| `'0.000001'` | `0.000001` | **`1e-6`** ✗ |
+| `'1e23'` | `1e+23` | `1e+23` ✓ |
+
+`main.rs:69` wraps `record-double` as `(f64,)` and `main.rs:130` prints it with
+`serde_json::to_string`, so the notation is the host's JSON writer, not Dart's
+`double.toString()` — and it disagrees with Dart at small magnitudes. The guest is correct:
+`double_to_string` (which formats in the guest and records a *string*) prints `0.000001` for
+the same bits, and `run_cases.mjs` passes `double_parse` because its collector formats through
+JavaScript's `Number.toString()` (`run_cases.mjs:212-216`), which matches Dart here.
+
+`double_parse_rounding` no longer traps either; it now hits the 30 s `TimeoutException`,
+joining `double_parse_rounding_bits` in cause D.
+
+This is a distinct cause, not A or B, so per the task rules it is **reported, not fixed** —
+fixing it means changing how the Rust host renders f64, which touches every case that records
+a double and needs its own review.
+
+### Verification — `dart test` (the `test_runner` + wasmtime path)
+
+```
+cd /workspace/pkg/wasm_components && dart test --reporter expanded
+```
+
+Before:
+
+```
+07:23 +10 -10: Some tests failed.
+=== SUITE EXIT 1 ===
+```
+
+After:
+
+```
+07:18 +15 -5: Some tests failed.
+=== SUITE EXIT 1 at 02:30:37 UTC 2026-09-27 ===
+```
+
+| case | before | after |
+|---|---|---|
+| datetime | pass | pass |
+| developer | pass | pass |
+| double_parse | FAIL (trap) | **FAIL** — cause E below |
+| double_parse_edge | pass | pass |
+| double_parse_rounding | FAIL (trap) | **FAIL** — cause D (30 s timeout) |
+| double_parse_rounding_bits | FAIL | FAIL — cause D, unchanged |
+| double_to_fixed | pass | pass |
+| double_to_string | FAIL (trap) | **pass** |
+| json_encode_string | pass | pass |
+| json_surrogates | pass | pass |
+| print | FAIL | FAIL — cause C, unchanged |
+| print_astral | FAIL | FAIL — cause C, unchanged |
+| regexp | FAIL (trap) | **pass** |
+| regexp_classes | pass | pass |
+| regexp_semantics | FAIL (trap) | **pass** |
+| regexp_unicode | pass | pass |
+| string | pass | pass |
+| string_from_char_codes | FAIL (trap) | **pass** |
+| string_replace | FAIL (trap) | **pass** |
+| weak | pass | pass |
+
+**15/20, up from 10/20.** All ten cases that passed before still pass. Newly passing:
+`string_from_char_codes`, `string_replace`, `regexp`, `regexp_semantics` (cause A) and
+`double_to_string` (cause B).
+
+`double_parse` and `double_parse_rounding` do **not** pass, and that has to be said plainly:
+both stopped trapping (their cause-B trap is gone), but each now fails on something else —
+cause E and cause D respectively. Neither is a string-length problem, and neither is addressed
+by this brief.
+
+### Other suites, no regression
+
+```
+pkg/wasm_tools       dart test  → 00:00 +8: All tests passed!   EXIT 0
+pkg/runtime_helpers  cargo test → 2 passed; 0 failed            EXIT 0
+run_cases.mjs        node       → 20 PASS, 0 FAIL               EXIT 0
+```
+
+`run_cases.mjs` never saw cause B because `WebAssembly.instantiate` runs the raw module's
+start section, so its eager statics were always initialised; and its `free` is a no-op, so it
+never saw cause A either. That is exactly the harness asymmetry described above, and it is
+why the two harnesses disagreed.
