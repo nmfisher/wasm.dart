@@ -990,6 +990,32 @@ function makeComponentRuntime(libc, collector) {
       dropWritableFuture(STDOUT_RESULT, future),
     'implicitImport_stdoutWriteViaStream': writeViaStream,
 
+    // Stack-trace capture: the trace exists only in Node, so render
+    // `Error().stack` here. The component function returns a `string`, which
+    // canon-lowers to a retptr call: write the `(pointer, length)` pair of a
+    // UTF-16 buffer allocated through the module's own realloc into the
+    // return area the caller passed.
+    'implicitImport_stackTraceCaptureUtf16': (capacity, returnArea) => {
+      const stack = new Error().stack ?? '';
+      const units = [];
+      for (const ch of stack) {
+        const code = ch.codePointAt(0);
+        if (code > 0xffff) {
+          units.push(0xd800 + ((code - 0x10000) >> 10), 0xdc00 + (code & 0x3ff));
+        } else {
+          units.push(code);
+        }
+      }
+      const kept = units.slice(0, capacity);
+      const ptr = libc.realloc(0, 0, 2, 2 * kept.length) >>> 0;
+      const view = new DataView(libc.memory.buffer);
+      for (let i = 0; i < kept.length; i++) {
+        view.setUint16(ptr + 2 * i, kept[i], true);
+      }
+      view.setUint32(returnArea, ptr, true);
+      view.setUint32(returnArea + 4, kept.length, true);
+    },
+
     _import0: (ptr, packedLength) => {
       collector.lines.push(
         JSON.stringify({
