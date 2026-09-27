@@ -8,11 +8,20 @@ The goal is to get `wasmtime run dart_compiled_app.wasm` to work without further
 > [!NOTE]
 > These tools are still in development and not ready for production. Please file issues for problems you run into!
 >
-> dart2wasm (as of Dart 3.13) emits the legacy `try` instruction in SDK internals, which Wasmtime's
-> engine does not implement, so compiled components validate but can't run in Wasmtime yet (see
-> the `print` row). The raw-module harness in `pkg/wasm_components/tool/run_cases.mjs` does run
-> them: it implements the component-model event loop (canon streams/futures, waitable sets and
-> the `callback` pump), so `print` completes there.
+> **Requires a Dart SDK `^3.14.0-251.0.dev`.** No released SDK satisfies that yet: the latest
+> stable is 3.13.4, beta is 3.14.0-211.1.beta and dev is 3.14.0-248.0.dev, all short of it.
+> Until a release reaches that revision you need to build the SDK from source at or past it
+> (`pub get` fails on anything older).
+>
+> Older dart2wasm emitted the legacy `try` instruction in SDK internals, which Wasmtime does not
+> implement, so compiled components validated but could not run there. From `3.14.0-251.0.dev`
+> (commit `de942dbb`, *"[dart2wasm] Translate exceptions to try_table instructions"*) dart2wasm
+> emits `try_table`/`throw_ref` instead, and compiled components run under Wasmtime with no
+> special flags. Verified with Wasmtime 47.0.4: `wasmtime run` on
+> `pkg/wasm_tools/example/hello_world_wasi` prints the expected output and exits 0.
+>
+> `pkg/wasm_components/tool/run_cases.mjs` remains useful as a Rust-free way to run the case
+> suite in Node.
 
 ## Approach
 
@@ -125,7 +134,7 @@ __Legend__:
 | mathLog                                  | ✅          | 🎯        | Using `libm` in Rust.         |
 | randomInt                                | ✅          | 📦        | Deterministic in raw module   |
 | randomIntSecure                          | ✅          | 📦        | Throws in raw module          |
-| print                                    | ✅          | 📦        | Via `wasi:cli/stdout`; completes at run time in the raw-module harness |
+| print                                    | ✅          | 📦        | Via `wasi:cli/stdout`; completes under Wasmtime (e.g. `hello_world_wasi`) and in the raw-module harness |
 | jsonEncodeString                         | ✅          | 🎯        | JSON string escaping          |
 | debugger                                 | ✅          | 🛑        | No-op; no debugger attached   |
 | inspect                                  | ✅          | 🛑        | No-op; no debugger attached |
