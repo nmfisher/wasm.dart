@@ -5,4 +5,8 @@
 {"type":"end","test":0}
 {"type":"start","test":1}
 {"type":"bool","value":true}
+{"type":"bool","value":true}
+{"type":"bool","value":true}
+{"type":"bool","value":true}
+{"type":"bool","value":true}
 {"type":"end","test":1}
