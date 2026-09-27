@@ -838,7 +838,7 @@ final class _GroupNode extends _RegexpNode {
   final int captureIndex;
 
   /// 0 non-capturing, 1 capturing, 2 lookahead `(?=`, 3 negative lookahead
-  /// `(?!`.
+  /// `(?!`, 4 lookbehind `(?<=`, 5 negative lookbehind `(?<!`.
   final int kind;
 
   _GroupNode(this.alternatives, this.captureIndex, this.kind);
@@ -866,6 +866,10 @@ final class _GroupNode extends _RegexpNode {
         return _tryLookahead(alternatives, matcher, next, position, true);
       case 3:
         return _tryLookahead(alternatives, matcher, next, position, false);
+      case 4:
+        return _tryLookbehind(alternatives, matcher, next, position, true);
+      case 5:
+        return _tryLookbehind(alternatives, matcher, next, position, false);
       case 1:
         return _tryCapturing(
           alternatives,
@@ -917,6 +921,66 @@ int? _tryLookahead(
       _tryAlternatives(alternatives, matcher, const _Halt(), position) != null;
   if (matched == positive) return next.run(position);
   return null;
+}
+
+/// Lookbehind: the body has to end exactly at [position], so each alternative
+/// is matched right-to-left: the reverse sequence tries one node after
+/// another backwards, and the first node of the alternative is called with an
+/// empty continuation. Every node already takes the fixed end position from
+/// the matcher and matches its own variable-width atom (character, class,
+/// group, backreference) ending there, so `(?<=ab)` and `(?<=a+)` both work.
+/// Captures written inside the body are undone when the lookbehind (or a
+/// later backtracking step) fails, like for lookaheads.
+int? _tryLookbehind(
+  List<List<_RegexpNode>> alternatives,
+  _RegexpMatcher matcher,
+  _MatchContinuation next,
+  int position,
+  bool positive,
+) {
+  final saved = matcher.snapshotCaptures();
+  var matched = false;
+  for (final nodes in alternatives) {
+    // The continuation only runs when the whole alternative matched; since
+    // the alternative ends at the lookbehind's position, it stops there.
+    if (_ReverseSequence(nodes, nodes.length - 1, matcher, const _Halt())
+            .run(position) !=
+        null) {
+      matched = true;
+      break;
+    }
+    matcher.restoreCaptures(saved);
+  }
+  if (matched != positive) {
+    matcher.restoreCaptures(saved);
+    return null;
+  }
+  final result = next.run(position);
+  if (result == null) matcher.restoreCaptures(saved);
+  return result;
+}
+
+/// Matches a list of nodes backwards: [index] runs after the nodes to its
+/// right have matched and ended at the matcher's fixed end position. The
+/// first node of the alternative hands the empty continuation, which cuts
+/// the match off at the lookbehind's start edge.
+class _ReverseSequence extends _MatchContinuation {
+  final List<_RegexpNode> nodes;
+  final int index;
+  final _RegexpMatcher matcher;
+  final _MatchContinuation next;
+
+  _ReverseSequence(this.nodes, this.index, this.matcher, this.next);
+
+  @override
+  int? run(int position) {
+    if (index < 0) return next.run(position);
+    return nodes[index].matchAt(
+      position,
+      matcher,
+      _ReverseSequence(nodes, index - 1, matcher, next),
+    );
+  }
 }
 
 /// Capturing group: tries each alternative; when the body matched, the span
@@ -1032,6 +1096,12 @@ final class _QuantifierNode extends _RegexpNode {
   final int firstCapture;
   final int captureCount;
 
+  /// Start of the iteration currently being matched by the forward walk.
+  /// Used by the reverse repetition to detect empty iterations (the
+  /// end-anchored body match returns the iteration's end, which the
+  /// continuation compares against this value).
+  int _lastEnd = -1;
+
   _QuantifierNode(
     this.atom,
     this.min,
@@ -1047,7 +1117,9 @@ final class _QuantifierNode extends _RegexpNode {
 
   @override
   int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
-    return _repeat(
+    final previousEnd = _lastEnd;
+    _lastEnd = position;
+    final result = _repeat(
       atom,
       min,
       max,
@@ -1058,6 +1130,8 @@ final class _QuantifierNode extends _RegexpNode {
       next,
       position,
     );
+    _lastEnd = previousEnd;
+    return result;
   }
 }
 
@@ -1164,6 +1238,371 @@ class _RepeatContinue extends _MatchContinuation {
       position,
     );
   }
+}
+
+/// An atom matched end-anchored inside a lookbehind: a reverse walk reaches
+/// this node with [end] being the position its match must finish at. The
+/// inner atom is matched *forwards* from the recovered start and accepted
+/// only when it ends exactly at [end].
+class _EndAnchoredNode extends _RegexpNode {
+  final _RegexpNode inner;
+
+  _EndAnchoredNode(this.inner);
+
+  @override
+  bool get canMatchEmpty => inner.canMatchEmpty;
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    // Candidates ascend from the input start (leftmost match wins), and a
+    // greedy body matched forward from the leftmost fit is the longest.
+    for (var start = 0; start <= end; ) {
+      final result = inner.matchAt(start, matcher, _AtEnd(end, start, next));
+      if (result != null) return result;
+      if (start == end) break;
+      final unit =
+          matcher.pattern.isUnicode ? matcher.codePointSizeAt(start) : 1;
+      start += unit;
+    }
+    return null;
+  }
+}
+
+/// Requires the inner match to end exactly at [end], then resumes [next] at
+/// [start] - the end-anchored form of "the node consumed up to here".
+class _AtEnd extends _MatchContinuation {
+  final int end;
+  final int start;
+  final _MatchContinuation next;
+
+  _AtEnd(this.end, this.start, this.next);
+
+  @override
+  int? run(int position) => position == end ? next.run(start) : null;
+}
+
+/// Chooses the reverse form of a node inside a lookbehind. Single-character
+/// atoms get dedicated reverse nodes; groups, backreferences and quantifiers
+/// are matched end-anchored or backwards as described on their classes.
+_RegexpNode _endAnchored(_RegexpNode node) {
+  if (node is _CharNode) return _ReverseCharNode(node);
+  if (node is _AstralCharNode) return _ReverseAstralCharNode(node);
+  if (node is _DotNode) return _ReverseDotNode(node);
+  if (node is _ClassNode) return _ReverseClassNode(node);
+  if (node is _BuiltinClassNode) return _ReverseBuiltinClassNode(node);
+  if (node is _LoneLeadSurrogateNode) return _ReverseLoneLeadSurrogateNode(node);
+  if (node is _LoneTrailSurrogateNode) {
+    return _ReverseLoneTrailSurrogateNode(node);
+  }
+  if (node is _QuantifierNode) return _ReverseQuantifierNode(node);
+  if (node is _AnchorNode || node is _WordBoundaryNode) return node;
+  if (node is _GroupNode) return _ReverseGroupNode(node);
+  if (node is _BackreferenceNode) return _ReverseBackreferenceNode(node);
+  throw UnsupportedError(
+    'Node type ${node.runtimeType} is not supported in a lookbehind',
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Reverse (lookbehind) nodes
+// ---------------------------------------------------------------------------
+
+/// Base for reverse nodes: they match one atom *ending* at [position] and
+/// resume [next] at the start of that atom. `widthBefore` steps back over
+/// the code unit (or code point in unicode mode) immediately before.
+abstract class _ReverseNode extends _RegexpNode {
+  @override
+  bool get canMatchEmpty => false;
+
+  _ReverseNode();
+
+  /// Width of the atom ending at [end]: one code unit outside unicode mode,
+  /// otherwise 2 when a surrogate pair ends there and 1 for a single unit
+  /// (paired or not, the pair check mirrors what [matchAt] then compares).
+  int widthBefore(_RegexpMatcher matcher, int end) {
+    if (end <= 0) return 0;
+    if (!matcher.pattern.isUnicode) return 1;
+    if (end >= 2) {
+      final lead = matcher.string.codeUnitAtUnchecked(end - 2);
+      final trail = matcher.string.codeUnitAtUnchecked(end - 1);
+      if (_isLeadSurrogate(lead) && _isTrailSurrogate(trail)) return 2;
+    }
+    return 1;
+  }
+}
+
+/// Literal code unit matched right-to-left: the unit at `end - 1` must be
+/// the node's character.
+class _ReverseCharNode extends _ReverseNode {
+  final _CharNode inner;
+
+  _ReverseCharNode(this.inner);
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    final start = end - widthBefore(matcher, end);
+    if (start < 0 || start >= end) return null;
+    if (!matcher.codeUnitEqualsAt(start, inner.code)) return null;
+    return next.run(start);
+  }
+}
+
+/// Astral code point matched right-to-left: the pair ending at [end].
+class _ReverseAstralCharNode extends _ReverseNode {
+  final _AstralCharNode inner;
+
+  _ReverseAstralCharNode(this.inner);
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (end < 2 || !matcher.pattern.isUnicode) return null;
+    final start = end - 2;
+    final actual = matcher.codePointAt(start);
+    if (actual == inner.code) return next.run(start);
+    if (matcher.pattern.isCaseSensitive) return null;
+    if (_canonicalizeCodePoint(actual, matcher.pattern.isUnicode) ==
+        _canonicalizeCodePoint(inner.code, matcher.pattern.isUnicode)) {
+      return next.run(start);
+    }
+    return null;
+  }
+}
+
+/// A lone lead surrogate escape matched right-to-left: the unit at `end - 1`
+/// is an unpaired lead surrogate.
+class _ReverseLoneLeadSurrogateNode extends _ReverseNode {
+  final _LoneLeadSurrogateNode inner;
+
+  _ReverseLoneLeadSurrogateNode(this.inner);
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (end < 1) return null;
+    final start = end - 1;
+    if (matcher.string.codeUnitAtUnchecked(start) != inner.code) return null;
+    if (start + 1 < matcher.inputLength &&
+        _isTrailSurrogate(matcher.string.codeUnitAtUnchecked(start + 1))) {
+      return null; // first half of a pair
+    }
+    return next.run(start);
+  }
+}
+
+/// A lone trail surrogate escape matched right-to-left: the unit at `end - 1`
+/// is an unpaired trail surrogate.
+class _ReverseLoneTrailSurrogateNode extends _ReverseNode {
+  final _LoneTrailSurrogateNode inner;
+
+  _ReverseLoneTrailSurrogateNode(this.inner);
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (end < 1) return null;
+    final start = end - 1;
+    if (matcher.string.codeUnitAtUnchecked(start) != inner.code) return null;
+    if (start > 0 &&
+        _isLeadSurrogate(matcher.string.codeUnitAtUnchecked(start - 1))) {
+      return null; // second half of a pair
+    }
+    return next.run(start);
+  }
+}
+
+/// `.` matched right-to-left.
+class _ReverseDotNode extends _ReverseNode {
+  final _DotNode inner;
+
+  _ReverseDotNode(this.inner);
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (end <= 0 || end > matcher.inputLength) return null;
+    final start = end - widthBefore(matcher, end);
+    if (start < 0) return null;
+    if (!inner.dotAll && matcher.isLineTerminatorAt(start)) return null;
+    return next.run(start);
+  }
+}
+
+/// A character class matched right-to-left.
+class _ReverseClassNode extends _ReverseNode {
+  final _ClassNode inner;
+
+  _ReverseClassNode(this.inner);
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (end <= 0 || end > matcher.inputLength) return null;
+    final start = end - widthBefore(matcher, end);
+    if (start < 0) return null;
+    final code = inner.unicode
+        ? matcher.codePointAt(start)
+        : matcher.string.codeUnitAtUnchecked(start);
+    var inside = inner._contains(code);
+    if (!inside && !matcher.pattern.isCaseSensitive) {
+      final canonical = inner._canonicalize(code);
+      if (canonical != code) inside = inner._contains(canonical);
+    }
+    if (!inside) {
+      inside = inner._matchesBuiltins(code, !matcher.pattern.isCaseSensitive);
+    }
+    if (inside == inner.negated) return null;
+    return next.run(start);
+  }
+}
+
+/// A builtin class escape matched right-to-left.
+class _ReverseBuiltinClassNode extends _ReverseNode {
+  final _BuiltinClassNode inner;
+
+  _ReverseBuiltinClassNode(this.inner);
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (end <= 0 || end > matcher.inputLength) return null;
+    final start = end - widthBefore(matcher, end);
+    if (start < 0) return null;
+    final code = matcher.string.codeUnitAtUnchecked(start);
+    var inside = inner._matchesCodeUnit(code);
+    if (!inside && !matcher.pattern.isCaseSensitive) {
+      final unicode = matcher.pattern.isUnicode;
+      final folded = _canonicalizeUnit(code, unicode);
+      if (folded != code) inside = inner._matchesCodeUnit(folded);
+    }
+    final kind = inner.kind;
+    if (kind == 0x44 || kind == 0x57 || kind == 0x53) inside = !inside;
+    if (!inside) return null;
+    return next.run(start);
+  }
+}
+
+/// A quantifier matched right-to-left: iterations are peeled off from the
+/// right. Each body iteration is matched end-anchored between its start and
+/// the iteration's end (the position the previous iteration started at or,
+/// for the rightmost iteration, the lookbehind's end edge); the walk then
+/// either continues with another iteration ending at that start or closes
+/// out. Greedy repetitions take an iteration before handing off, lazy ones
+/// hand off first - the same preference order as the forward walk. The
+/// looping lives in [_RepeatBackwards], a continuation, so forward-matching
+/// body atoms stay transparent.
+class _ReverseQuantifierNode extends _RegexpNode {
+  final _QuantifierNode inner;
+
+  _ReverseQuantifierNode(this.inner);
+
+  @override
+  bool get canMatchEmpty => inner.canMatchEmpty;
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    return _RepeatBackwards.first(inner, matcher, next).run(end);
+  }
+}
+
+/// The rest of a reverse repetition after the iterations to its right have
+/// been peeled off: when driven at [position] (the end of the remaining
+/// span, i.e. the start of the iteration just taken), it takes one more
+/// iteration - matched end-anchored between some start <= [position] and
+/// [position] - then either continues with one more [_RepeatBackwards] at
+/// that start or closes out through [next] there.
+class _RepeatBackwards extends _MatchContinuation {
+  final _QuantifierNode inner;
+  final _RegexpMatcher matcher;
+  final _MatchContinuation next;
+
+  /// Iterations still owed (the remaining `min`).
+  int remainingMin;
+
+  /// Iterations taken so far (for the remaining `max`).
+  final int taken;
+
+  _RepeatBackwards(this.inner, this.matcher, this.next, this.remainingMin, this.taken);
+
+  /// Enters the repetition right-to-left at [end]: the first (rightmost)
+  /// iteration ends at [end].
+  factory _RepeatBackwards.first(
+    _QuantifierNode inner,
+    _RegexpMatcher matcher,
+    _MatchContinuation next,
+  ) => _RepeatBackwards(inner, matcher, next, inner.min, 0);
+
+  @override
+  int? run(int position) {
+    if (inner.max >= 0 && taken >= inner.max) {
+      return remainingMin > 0 ? null : next.run(position);
+    }
+    if (remainingMin == 0 && inner.lazy) {
+      // Lazy: handing off is preferred over taking another iteration (the
+      // same order as the forward walk's lazy zero-min branch).
+      final done = next.run(position);
+      if (done != null) return done;
+    }
+    final saved = _saveCaptures(matcher, inner.firstCapture, inner.captureCount);
+    // The body iteration has to end exactly at [position]: match it
+    // forwards from every candidate start (leftmost first, so a greedy
+    // body is taken leftmost-longest, like the VM) and accept only the
+    // candidate that lands on [position], resuming the repetition at that
+    // candidate.
+    for (var start = 0; start <= position; ) {
+      final bodyResult = inner.atom.matchAt(
+        start,
+        matcher,
+        _AtEnd(position, start, _RepeatBackwardsStep(inner, matcher, this)),
+      );
+      if (bodyResult != null) return bodyResult;
+      if (start == position) break;
+      final unit =
+          matcher.pattern.isUnicode ? matcher.codePointSizeAt(start) : 1;
+      start += unit;
+    }
+    _restoreCaptures(matcher, inner.firstCapture, saved);
+    // No iteration fits to the left: greedy stops here and hands off (if
+    // the minimum is met), lazy already tried the hand-off above.
+    if (remainingMin > 0) return null;
+    return next.run(position);
+  }
+}
+
+/// Continues a reverse repetition after one body iteration matched: the
+/// iteration's start is where the next one has to end (or where the walk
+/// hands off to [next]).
+class _RepeatBackwardsStep extends _MatchContinuation {
+  final _QuantifierNode inner;
+  final _RegexpMatcher matcher;
+  final _RepeatBackwards repetition;
+
+  _RepeatBackwardsStep(this.inner, this.matcher, this.repetition);
+
+  @override
+  int? run(int position) {
+    final repetition = this.repetition;
+    final remainingMin = repetition.remainingMin;
+    if (remainingMin == 0 && position == inner._lastEnd) {
+      // An empty iteration cannot advance a backwards walk; without this
+      // check `(?:x*)*`-style bodies would recurse forever (the same rule
+      // as the forward walk's RepeatMatcher step 2a).
+      return null;
+    }
+    return _RepeatBackwards(
+      inner,
+      matcher,
+      repetition.next,
+      remainingMin > 0 ? remainingMin - 1 : 0,
+      repetition.taken + 1,
+    ).run(position);
+  }
+}
+
+/// A group inside a lookbehind: the group's body is matched backwards as a
+/// whole (its alternatives in declared order, like the forward walk).
+class _ReverseGroupNode extends _EndAnchoredNode {
+  _ReverseGroupNode(super.inner);
+}
+
+/// A backreference matched right-to-left: the captured text must appear
+/// immediately before [end].
+class _ReverseBackreferenceNode extends _EndAnchoredNode {
+  _ReverseBackreferenceNode(super.inner);
 }
 
 /// One step of the `RepeatMatcher`: [min] and [max] count the iterations
@@ -1487,13 +1926,20 @@ class _RegexpParser {
         case 0x21: // (?!
           position++;
           kind = 3;
-        case 0x3c: // (?<name>…>  (lookbehind is not supported)
+        case 0x3c: // (?<name>…) or the lookbehinds (?<=…) / (?<!…)
           position++;
-          if (peek() == 0x3d || peek() == 0x21) {
-            fail('Lookbehind assertions are not supported');
+          if (peek() == 0x3d) {
+            // (?<=
+            position++;
+            kind = 4;
+          } else if (peek() == 0x21) {
+            // (?<!
+            position++;
+            kind = 5;
+          } else {
+            name = parseGroupName();
+            kind = 1;
           }
-          name = parseGroupName();
-          kind = 1;
         default:
           fail('Invalid group');
       }
@@ -1504,7 +1950,17 @@ class _RegexpParser {
       if (name != null) groupIndicesByName[name] = captureIndex;
     }
     final alternatives = parseGroupAlternatives();
-    final node = _GroupNode(alternatives, captureIndex, kind);
+    // Inside a lookbehind the match walk is right-to-left: each element is
+    // anchored at the position it must *end* at. Single-character atoms
+    // can be matched backwards directly; everything else is wrapped so it
+    // matches end-anchored (see [_EndAnchoredNode]).
+    final effective = (kind == 4 || kind == 5)
+        ? [
+            for (final nodes in alternatives)
+              [for (final node in nodes) _endAnchored(node)],
+          ]
+        : alternatives;
+    final node = _GroupNode(effective, captureIndex, kind);
     if (kind == 1) {
       // The range covers this group's own index and every nested group parsed
       // while its body was parsed (they all got higher indices).
