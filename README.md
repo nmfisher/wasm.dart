@@ -58,10 +58,10 @@ __Legend__:
 
 | Method                                   | Implemented | Category | Notes                         |
 |------------------------------------------|-------------|----------|-------------------------------|
-| scheduleOnce                             | ✅          | 📦        | Stub; always throws           |
-| scheduleRepeated                         | ✅          | 📦        | Stub; always throws           |
+| scheduleOnce                             | ✅          | 📦        | Implemented on WASI timers    |
+| scheduleRepeated                         | ✅          | 📦        | Implemented on WASI timers    |
 | queueMicrotask                           | ✅          | 🎯        |                               |
-| clearSchedule                            | ✅          | 📦        | Stub; always throws           |
+| clearSchedule                            | ✅          | 📦        | Implemented on WASI timers    |
 | currentTimeMicros                        | ✅          | 📦        |                               |
 | stringFromCharCodeArray                  | ✅          | 🎯        |                               |
 | stringFromAsciiBytes                     | ✅          | 🎯        |                               |
@@ -92,8 +92,8 @@ __Legend__:
 | finalizerDetach                          | ✅          | 🛑        | No-op stub; no GC yet         |
 | baseUri                                  | ✅          | 📦        | Fixed file:/// stub           |
 | isWindows                                | ✅          | 📦        | Always false                  |
-| stackTraceGetCurrent                     | ✅          | 🛑        | Impossible, stub used         |
-| stackTraceToString                       | ✅          | 🛑        | Impossible, stub used         |
+| stackTraceGetCurrent                     | ✅          | 🛑        | Host capture; stub if unused  |
+| stackTraceToString                       | ✅          | 🛑        | Renders the captured trace    |
 | doubleTryParse                           | ✅          | 🎯        |                               |
 | tryParseResultGetDouble                  | ✅          | 🎯        |                               |
 | doubleParseInfallible                    | ✅          | 🎯        |                               |
@@ -109,7 +109,7 @@ __Legend__:
 | stringBufferClear                        | ✅          | 🎯        |                               |
 | stringBufferLength                       | ✅          | 🎯        |                               |
 | stringBufferToString                     | ✅          | 🎯        |                               |
-| regexpCreateOrFailWithString             | ✅          | 🎯        | Custom engine; no lookbehind  |
+| regexpCreateOrFailWithString             | ✅          | 🎯        | Custom engine; lookbehind incl. |
 | regexpIsRegexp                           | ✅          | 🎯        |                               |
 | regexpEscape                             | ✅          | 🎯        |                               |
 | regexpMatch                              | ✅          | 🎯        |                               |
@@ -120,7 +120,7 @@ __Legend__:
 | regexpMatchGetNamedGroups                | ✅          | 🎯        |                               |
 | regexpMatchGetGroupName                  | ✅          | 🎯        |                               |
 | regexpMatchGetGroupByName                | ✅          | 🎯        |                               |
-| timeZoneNameForClampedSeconds            | ✅          | 📦        | UNKNOWN TZ id (no tz db)      |
+| timeZoneNameForClampedSeconds            | ✅          | 📦        | Fixed `UTC` (no tz db)        |
 | timeZoneOffsetInSecondsForClampedSeconds | ✅          | 📦        | Always 0 (UTC; no tz db)      |
 | mathPow                                  | ✅          | 🎯        | Using `libm` in Rust.         |
 | mathAtan2                                | ✅          | 🎯        | Using `libm` in Rust.         |
