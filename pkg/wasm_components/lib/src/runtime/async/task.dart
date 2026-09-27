@@ -215,6 +215,31 @@ final class Task {
     }
   }
 
+  /// Configures [task] as the current task on this thread.
+  ///
+  /// Only for the embedder: timer callbacks arrive outside of any task
+  /// running, so re-associating the thread lets them use the task's machinery
+  /// (see `EmbedderTimer`).
+  void enter() {
+    _contextSet(_id.toWasmI32());
+    _isRunning = true;
+  }
+
+  /// Reverts what [enter] did.
+  void exit() {
+    _isRunning = false;
+  }
+
+  /// Runs [body] in this task's zone, as if the task's own code had called it.
+  ///
+  /// The embedder uses this to register timer continuations: futures awaited
+  /// there queue their microtasks on this task's event loop, where they are
+  /// drained between host events (a microtask scheduled on the root zone
+  /// would never run, as the embedder only ever calls back into this task).
+  void runInZone(void Function() body) {
+    _rootZone.run(body);
+  }
+
   void removeSubtask(int index) {
     _subtaskDrop(index.toWasmI32());
     _subtasks.remove(index);

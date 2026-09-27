@@ -256,6 +256,12 @@ const COPY_COMPLETED = 0;
 const COPY_DROPPED = 1;
 const COPY_CANCELLED = 2;
 
+// See `SubtaskState` (waitable.dart) and the waitable-set event payload
+// encoding in the Canonical ABI: the low 4 bits carry the state.
+const SUBTASK_STARTING = 0;
+const SUBTASK_RETURNED = 2;
+const SUBTASK_CANCELLED_BEFORE_STARTED = 3;
+
 // See `EventCode` in the Canonical ABI (and waitable.dart).
 const EVENT_SUBTASK = 1;
 const EVENT_STREAM_READ = 2;
@@ -312,6 +318,94 @@ class WaitableSet {
     }
     return null;
   }
+}
+
+// The host side of a `wasi:clocks/monotonic-clock wait-for` subtask. The
+// clock is virtual: a pending timer fires once the pump has advanced the
+// virtual clock past its deadline (see `advanceClock`). `cancel` resolves the
+// subtask as `cancelled-before-started`, which wakes the guest side exactly
+// like a cancellation from any other async builtin.
+class WaitableClock {
+  pendingEvent = null;
+  wset = null;
+  #dead = false;
+  // The handle-table index the owning runtime assigned; the event payload
+  // must carry it (see `fire`).
+  handleIndex = 0;
+
+  constructor(durationNanos) {
+    this.deadline = currentVirtualTime() + durationNanos;
+    pendingTimers.push(this);
+  }
+
+  hasPendingEvent() {
+    return this.pendingEvent !== null;
+  }
+
+  getPendingEvent() {
+    const event = this.pendingEvent;
+    this.pendingEvent = null;
+    return event();
+  }
+
+  join(wset) {
+    if (this.wset !== null) {
+      this.wset.elems.splice(this.wset.elems.indexOf(this), 1);
+    }
+    this.wset = wset;
+    if (wset !== null) {
+      wset.elems.push(this);
+    }
+  }
+
+  // Delivers the completion (or cancellation) event; called by the pump once
+  // the virtual clock has passed the deadline.
+  fire(state) {
+    if (this.#dead) return;
+    this.#dead = true;
+    const index = this.handleIndex;
+    this.pendingEvent = () => [EVENT_SUBTASK, index, state];
+  }
+
+  cancel() {
+    if (this.#dead) return;
+    pendingTimers.splice(pendingTimers.indexOf(this), 1);
+    this.fire(SUBTASK_CANCELLED_BEFORE_STARTED);
+  }
+}
+
+// One virtual monotonic clock per run: a case sees time stand still except
+// when the event pump advances it past a timer deadline. Timers register in
+// `pendingTimers` and carry their handle-table index in `clockHandles`, so
+// `subtask.drop` can clean them up.
+let virtualTimeNanos = 0n;
+const pendingTimers = [];
+
+function currentVirtualTime() {
+  return virtualTimeNanos;
+}
+
+// Advances the clock to the earliest pending timer deadline (if reached) and
+// fires every timer that is due. Returns true if any timer fired.
+function advanceClock() {
+  if (pendingTimers.length === 0) return false;
+  let earliest = pendingTimers[0].deadline;
+  for (const timer of pendingTimers) {
+    if (timer.deadline < earliest) earliest = timer.deadline;
+  }
+  if (earliest > virtualTimeNanos) {
+    virtualTimeNanos = earliest;
+  }
+  let fired = false;
+  for (let i = pendingTimers.length - 1; i >= 0; i--) {
+    const timer = pendingTimers[i];
+    if (timer.deadline <= virtualTimeNanos) {
+      pendingTimers.splice(i, 1);
+      timer.fire(SUBTASK_RETURNED);
+      fired = true;
+    }
+  }
+  return fired;
 }
 
 // A buffer over guest memory. `progress` counts transferred elements; `read`
@@ -551,6 +645,7 @@ const READ_CHUNK = 4096;
 
 function makeComponentRuntime(libc, collector) {
   const handles = new HandleTable();
+  const clockHandles = new Map();
   const drains = [];
   const decoder = new TextDecoder();
   let context = 0;
@@ -735,7 +830,9 @@ function makeComponentRuntime(libc, collector) {
   // The guest runs a case inside a task; its event loop is driven through the
   // exported `callback` function. A task returns `wait` with the index of its
   // waitable set whenever it still has work, and the pump delivers pending
-  // events (running host-side drains in between) until the set is empty.
+  // events (running host-side drains in between) until the set is empty. When
+  // the only thing left is a timer, the pump advances the virtual clock to
+  // its deadline so the wait-for subtask becomes ready.
   function driveTask(instance) {
     if (taskSetIndex === null) {
       throw new Error('the test case did not create a task waitable set');
@@ -766,10 +863,14 @@ function makeComponentRuntime(libc, collector) {
         continue;
       }
       if (set.elems.length === 0) return;
-      throw new Error(
-        `task stalled: ${set.elems.length} waitable(s) in set ${setIndex} ` +
-          `with no pending events`,
-      );
+      // A non-empty, quiescent set means a timer is pending: advance the
+      // virtual clock and start over. Anything else stuck here is a bug.
+      if (!advanceClock()) {
+        throw new Error(
+          `task stalled: ${set.elems.length} waitable(s) in set ${setIndex} ` +
+            `with no pending events`,
+        );
+      }
     }
   }
 
@@ -779,19 +880,48 @@ function makeComponentRuntime(libc, collector) {
       context = value;
     },
     'canon.waitable-set.new': () => {
-      taskSetIndex = handles.add(new WaitableSet());
+           taskSetIndex = handles.add(new WaitableSet());
       return taskSetIndex;
     },
+    'canon.waitable-set.drop': (set) => {
+      // The task drops its waitable set when it exits early (no pending
+      // subtasks, streams or futures left) and then returns `exit`, so the
+      // stale handle is never dereferenced afterwards. Removing it from the
+      // table is all a host has to do here.
+      handles.remove(set);
+    },
     'canon.waitable.join': (waitable, set) => {
-      handles.get(waitable).join(handles.get(set));
+      // `set` 0 is the null set (see `SubtaskImpl.cancel`, which removes a
+      // waitable from its set before cancelling it).
+      const setHandle = set === 0 ? null : handles.get(set);
+      handles.get(waitable).join(setHandle);
     },
 
-    // Subtasks are created by async imports (timers lower to a
-    // `wasi:clocks/monotonic-clock.wait-for` subtask). No case here starts one
-    // at run time, but the timer machinery is compiled in whenever it is
-    // reachable, so the import must exist.
+    // Subtasks are created by async imports. The timer machinery lowers
+    // `wasi_monotonic_waitFor` to a `wasi:clocks/monotonic-clock wait-for`
+    // subtask; the host side is the virtual clock below. Print lowers to a
+    // `wasi:cli/stdout` stream write, which `StdoutDrain` drives.
+    'implicitImport_monotonicWaitFor': (durationNanosHi, durationNanosLo) => {
+      const duration =
+        (BigInt(durationNanosHi >>> 0) << 32n) | BigInt(durationNanosLo >>> 0);
+      const clock = new WaitableClock(duration);
+      clock.handleIndex = handles.add(clock);
+      // pack: state in the low nibble, waitable handle in the upper bits.
+      return Number((BigInt(clock.handleIndex) << 4n) | BigInt(SUBTASK_STARTING));
+    },
     'canon.subtask.drop': (subtask) => {
-      handles.remove(subtask).join(null);
+      const entry = handles.remove(subtask);
+      entry.join(null);
+    },
+
+    // `subtask.cancel` must exist because `clearSchedule` cancels a timer's
+    // wait-for subtask (see `EmbedderTimer` in timer.dart). In this host the
+    // waitable has not started, so the cancellation completes immediately as
+    // `cancelled-before-started` and needs no blocking round trip.
+    'canon.subtask.cancel': (subtask) => {
+      const entry = handles.get(subtask);
+      entry.cancel();
+      return SUBTASK_CANCELLED_BEFORE_STARTED;
     },
 
     // `canon task.return` for the async `invoke-test` export: the generated
@@ -815,6 +945,26 @@ function makeComponentRuntime(libc, collector) {
       dropEnd(ReadableFutureEnd, VOID, future),
     'canon.future<void>.drop-write': (future) =>
       dropWritableFuture(VOID, future),
+
+    // The SDK's Stopwatch reads the monotonic clock; report the same virtual
+    // clock the timers run on so elapsed time matches scheduled time.
+    'implicitImport_monotonicTicks': () => {
+      const micros = virtualTimeNanos / 1000n;
+      return (micros << 32n) | 0x1000n; // 4096 ticks per microsecond
+    },
+    'implicitImport_monotonicDuration': () => {
+      // Resolution: 1 nanosecond (value in nanoseconds, u64).
+      return 1n;
+    },
+    // Wall clock: also virtual, tracking the monotonic virtual clock (a case
+    // measuring DateTime across timers sees them advance together).
+    'implicitImport_systemClockNow': (ptr) => {
+      const seconds = virtualTimeNanos / 1_000_000_000n;
+      const nanos = virtualTimeNanos % 1_000_000_000n;
+      const view = new DataView(libc.memory.buffer);
+      view.setBigUint64(Number(ptr), seconds, true);
+      view.setBigUint32(Number(ptr) + 8, Number(nanos), true);
+    },
 
     // The embedder's `print` (tmp_print.dart) uses these to talk to
     // `wasi:cli/stdout`.
@@ -853,7 +1003,7 @@ function makeComponentRuntime(libc, collector) {
     _import3: collector.recordBool,
   };
 
-  return { imports, beginTask, driveTask };
+  return { imports, beginTask, driveTask, handles };
 }
 
 function runCase(dartFile, wasmFile) {
@@ -883,6 +1033,42 @@ function runCase(dartFile, wasmFile) {
 
   const libc = makeLibc();
   const collector = makeCollector();
+  // The virtual-clock waitables live in the component runtime's handle
+  // table; the runtime is created here so the raw `dart.wasi_*` fallbacks
+  // below can register timer subtasks in it.
+  const runtime = makeComponentRuntime(libc, collector);
+  const handles = runtime.handles;
+
+  // JS implementations of the raw `dart.wasi_*` clock imports for modules
+  // that do not carry an embedder export for them (see the fallback in the
+  // `dart` import table below). They run on the same virtual clock as the
+  // component-model wait-for subtasks, so both compilation paths stay
+  // comparable.
+  function clockTicksValue() {
+    // The guest's `_initializeFrequency` decides the tick unit from the
+    // resolution: a 1 ns resolution means ticks are nanoseconds at 1 GHz
+    // reporting — but the SDK restricts the Stopwatch to 1 kHz/1 MHz, so
+    // mirror the component path: 4096 ticks per microsecond, value packed as
+    // (ticks << 32) | 4096 like `implicitImport_monotonicTicks`.
+    const micros = virtualTimeNanos / 1000n;
+    return (micros << 32n) | 0x1000n;
+  }
+
+  function wasiNowPtr(ptr) {
+    const seconds = virtualTimeNanos / 1_000_000_000n;
+    const nanos = virtualTimeNanos % 1_000_000_000n;
+    const view = new DataView(libc.memory.buffer);
+    view.setBigUint64(Number(ptr), seconds, true);
+    view.setUint32(Number(ptr) + 8, Number(nanos), true);
+  }
+
+  function scheduleVirtualWaitFor(durationNanos) {
+    const clock = new WaitableClock(durationNanos);
+    clock.handleIndex = handles.add(clock);
+    return Number(
+      (BigInt(clock.handleIndex) << 4n) | BigInt(SUBTASK_STARTING),
+    );
+  }
 
   let instance = null;
   // Every `dart.*` import must be provided by an export of the same module.
@@ -895,6 +1081,26 @@ function runCase(dartFile, wasmFile) {
     dart[name] = (...args) => {
       const implementation = instance?.exports[name];
       if (implementation == null) {
+        // The embedder module (merged in by the component compiler) does not
+        // implement the wasi_* clock imports: they exist so the SDK can talk
+        // to a WASI host directly. This runner compiles with raw dart2wasm,
+        // where they stay unresolved; serve them from the virtual clock like
+        // the component path's `implicitImport_*` imports do. `print` is
+        // served from the SDK's own export (the stdout machinery below).
+        if (name === 'wasi_now') {
+          wasiNowPtr(...args);
+          return;
+        }
+        if (name === 'wasi_iana_id') return;
+        if (name === 'wasi_monotonic_now') {
+          return clockTicksValue();
+        }
+        if (name === 'wasi_monotonic_getResolution') {
+          return 1n; // resolution: 1 nanosecond
+        }
+        if (name === 'wasi_monotonic_waitFor') {
+          return scheduleVirtualWaitFor(...args);
+        }
         throw new Error(
           `The import dart.${name} has no wasm:export implementation in the test module.`,
         );
@@ -906,7 +1112,6 @@ function runCase(dartFile, wasmFile) {
   // A miniature component runtime: the handle table, the stream/future copy
   // protocol, waitable sets and the `callback` event pump that a task needs
   // (see `makeComponentRuntime` above).
-  const runtime = makeComponentRuntime(libc, collector);
   const component = runtime.imports;
   // The collector imports are named _import0.._import3 in the generated
   // bindings. Any import without a host implementation fails instantiation
@@ -953,22 +1158,29 @@ function runCase(dartFile, wasmFile) {
     lines.push(`{"type":"start","test":${i}}`);
     // `component_1` runs the case inside a task (spawnTask). The call returns
     // once the case's synchronous part is done; async work is then driven by
-    // the event pump below.
+    // the event pump below. A case that finished synchronously (no pending
+    // subtasks, streams or futures) exits its task inside the call, dropping
+    // the waitable set — the returned code then says so and there is nothing
+    // left to drive.
     runtime.beginTask();
+    let finishedSync = false;
     try {
-      instance.exports.component_1(i);
+      const packed = instance.exports.component_1(i) >>> 0;
+      finishedSync = (packed & 0xf) === CALLBACK_EXIT;
     } catch (error) {
       console.error(`FAIL ${caseName}: test ${i} threw`, String(error));
       throw error;
     }
-    // Flush the task: deliver pending events until its waitable set is empty.
-    // Printed output reaches the collector only once its drain finishes, so
-    // this must happen before the `end` marker.
-    try {
-      runtime.driveTask(instance);
-    } catch (error) {
-      console.error(`FAIL ${caseName}: test ${i} stalled`, String(error));
-      throw error;
+    if (!finishedSync) {
+      // Flush the task: deliver pending events until its waitable set is
+      // empty. Printed output reaches the collector only once its drain
+      // finishes, so this must happen before the `end` marker.
+      try {
+        runtime.driveTask(instance);
+      } catch (error) {
+        console.error(`FAIL ${caseName}: test ${i} stalled`, String(error));
+        throw error;
+      }
     }
     lines.push(`{"type":"end","test":${i}}`);
   }
