@@ -9,7 +9,6 @@ import 'dart:_wasm';
 import '../runtime/async/task.dart';
 import '../runtime/async/timer.dart';
 import 'clock.dart';
-import 'constants.dart';
 import 'double_format.dart';
 import 'double_parse.dart';
 import 'json_encode.dart';
@@ -366,18 +365,6 @@ WasmVoid stringToCodeUnits(
   final impl = WasmStringImplementation.fromExtern(string);
   impl.writeIntoCharArray(outArray, startIndex.toIntUnsigned(), 0, impl.length);
   return WasmVoid();
-}
-
-@pragma('wasm:export')
-WasmI32 isWindows() {
-  // This is only used for URI<->file path formatting, which is not relevant for
-  // WASI.
-  return const WasmI32(0);
-}
-
-@pragma('wasm:export')
-WasmExternRef? baseUri() {
-  return stubRootUri.externalize();
 }
 
 @pragma('wasm:export')

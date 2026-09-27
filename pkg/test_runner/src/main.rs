@@ -135,6 +135,42 @@ async fn async_main() -> Result<()> {
             Ok((text,))
         })?;
     }
+    // The `dart:timeline` dependency: every guest timeline event arrives as
+    // one canonical call, and the host writes it as one NDJSON line onto
+    // stderr - the only stream that never mixes with the stdout events the
+    // run output is read from. The guest allocated the two strings in its
+    // own linear memory and frees them after the call returns, so
+    // `func_wrap`'s automatic `String` lowering copies them out before the
+    // host returns.
+    {
+        let mut root = linker.root();
+        let mut timeline = root.instance("wasm:dart/timeline@1.0.0")?;
+        timeline.func_wrap(
+            "record-task-event",
+            |_store,
+             params: (
+                u8,
+                i32,
+                i32,
+                String,
+                String,
+            )| {
+                let (event_type, task_id, flow_id, name, arguments_as_json) =
+                    params;
+                let line = serde_json::json!({
+                    "opt": "timeline",
+                    "ty": "timelineEvent",
+                    "type": event_type,
+                    "task": task_id,
+                    "flow": flow_id,
+                    "name": name,
+                    "args": arguments_as_json,
+                });
+                eprintln!("{line}");
+                Ok((true,))
+            },
+        )?;
+    }
     // The compiled components import `wasi:cli/stdout` (print) and
     // `wasi:random/insecure` (Random); without these the instantiation
     // fails with a missing import.

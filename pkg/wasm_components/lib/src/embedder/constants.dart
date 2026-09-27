@@ -21,5 +21,3 @@ const WasmArray<WasmI8> digits = WasmArray.literal([48, 49, 50, 51, 52, 53, 54, 
 const Latin1String unknownTimezone = Latin1String.unsafeWrap(
   WasmArray.literal([85, 84, 67]),
 );
-/// The string `cm-root:/`
-const Latin1String stubRootUri = Latin1String.unsafeWrap(WasmArray.literal([99, 109, 45, 114, 111, 111, 116, 58, 47]));

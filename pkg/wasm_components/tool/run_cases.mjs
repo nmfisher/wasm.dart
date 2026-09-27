@@ -46,6 +46,15 @@ const packageConfig = path.join(
 );
 
 function compile(dartFile, outWasm) {
+  // Build-time facts the component cannot ask a host for: the directory of
+  // the compiled entry point (`Uri.base`) and the platform the build ran on
+  // (`_Uri._isWindows`). The two `-D` defines must match what the compiler
+  // (`wasm_tools`) passes for a component build - the embedder reads them
+  // through `fromEnvironment` constants.
+  const defines = [
+    `-Ddart.wasm.baseUri=${pathToFileUrl(path.dirname(dartFile))}/`,
+    `-Ddart.wasm.isWindows=${process.platform === 'win32'}`,
+  ];
   execFileSync(
     dartAotRuntime,
     [
@@ -59,11 +68,24 @@ function compile(dartFile, outWasm) {
       '--no-minify',
       '--no-strip-wasm',
       '-O0',
+      ...defines,
       dartFile,
       outWasm,
     ],
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
+}
+
+/// Renders a directory path as a `file:` URL with a trailing slash, matching
+/// what `Uri.directory(dir)` produces on the VM the compiler runs on.
+function pathToFileUrl(dirPath) {
+  const base = path.resolve(dirPath);
+  if (process.platform === 'win32') {
+    const drive = base.slice(0, 2);
+    const rest = base.slice(2).replaceAll('\\', '/');
+    return `file:///${drive.toLowerCase()}${rest}`;
+  }
+  return `file://${base.split('/').map(encodeURIComponent).join('/')}`;
 }
 
 function readU32(bytes, pos) {
@@ -1014,6 +1036,42 @@ function makeComponentRuntime(libc, collector) {
       }
       view.setUint32(returnArea, ptr, true);
       view.setUint32(returnArea + 4, kept.length, true);
+    },
+
+    // Timeline sink: every guest timeline event lands here as one NDJSON
+    // line on stderr - the only host channel that never mixes with the
+    // stdout events the golden comparison reads. Strings arrive as
+    // `(pointer, length)` UTF-16 pairs in linear memory; they were
+    // allocated by the guest for this call and are freed right after the
+    // call returns, so copy the characters out before returning.
+    'implicitImport_timelineReportTaskEvent': (
+      eventType,
+      taskId,
+      flowId,
+      namePtr,
+      nameLength,
+      argsPtr,
+      argsLength,
+    ) => {
+      const view = new DataView(libc.memory.buffer);
+      const readString = (ptr, length) => {
+        let text = '';
+        for (let i = 0; i < length; i++) {
+          text += String.fromCharCode(view.getUint16(ptr + 2 * i, true));
+        }
+        return text;
+      };
+      const line = JSON.stringify({
+        opt: 'timeline',
+        ty: 'timelineEvent',
+        type: eventType,
+        task: taskId,
+        flow: flowId,
+        name: readString(namePtr, nameLength),
+        args: readString(argsPtr, argsLength),
+      });
+      fs.writeSync(2, line + '\n');
+      return 1;
     },
 
     _import0: (ptr, packedLength) => {
