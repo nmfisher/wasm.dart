@@ -101,6 +101,17 @@ timezone host call either, so the name always reports `UTC` and the offset a con
   other, which is what makes the fallback honest rather than misleading - a name like
   `UNKNOWN TZ` would contradict the offset reported beside it.
 
+- **We tried the host half, and it is not enough by itself.** An implementation was written
+  for this repository's Rust runner: `wasi:clocks/timezone@0.3.0` with `iana-id` and
+  `utc-offset`, the zone taken from `TZ` or the system zone, and the rules read from the
+  system `zoneinfo` database. The `jiff` crate it needs is already in this workspace's
+  `Cargo.lock`, so no new dependency and no network access were required. It compiled and
+  loaded, but a component built from a program that reads `DateTime.now().timeZoneName`
+  does not import that interface at all, so the instance had nothing to serve and the
+  guest kept reporting the embedder's constant `UTC`. The change was reverted rather than
+  kept as dead code, and it only becomes worth having once the guest opts in to asking the
+  host, with the trade-off described above.
+
 ### The timezone host attempt
 
 Serving `wasi:clocks/timezone@0.3.0` from this repo's Rust runner (`pkg/test_runner`),
