@@ -78,37 +78,50 @@ just the wall/system and monotonic clocks, and this repo's Rust test runner adds
 timezone host call either, so the name always reports `UTC` and the offset a constant
 `0`. Three routes out of that gap:
 
-- **Implement the interface in the host (recommended).** The compiler-side mapping
+- **Implement the interface in the host (necessary, not sufficient on its own).** The
+  compiler-side mapping
   already exists, and it is upstream's, not ours: the `wasi_iana_id` case in
-  `pkg/wasm_tools/lib/src/compiler/transform.dart` links the guest's timezone-name lookup
-  to `wasi:clocks/timezone@0.3.0` `iana-id` (the same code ships on `origin/main`), and
-  the interface itself is defined in the WIT wasmtime distributes (`iana-id`,
-  `utc-offset`, `to-debug-string`), still marked unstable in the WASI spec - so a host
-  implementation would serve an unstable interface. The mapping never fires in this
-  repo's builds, though: it runs only for a module that still imports
-  `dart.timeZoneNameForClampedSeconds`, and our embedder implements that import itself -
-  the constant name and zero offset described under _What ships today_ below - so no
-  module linked from this repository reaches the host link. The interface becomes
-  reachable only when the guest opts in by importing `wasi:clocks/timezone` directly,
-  and an opt-in needs a capable host to answer, the way the stack-trace import
-  `wasm:dart/trace@1.0.0` does: the embedder would ask the host for the zone instead of
-  answering from its constant, and the transform would wire the request through. For
-  the name that mapping already exists; the offset has no host import to rewire
-  (`timeZoneOffsetInSecondsForClampedSeconds` is a pure Dart-side constant), so real
-  offsets would need `utc-offset` plumbing added on the SDK side too. The host half
-  could live in either place: in `wasmtime-wasi`, where it would benefit every host, or
-  in this repo's runner - the cheaper change, but it serves only hosts using that
-  runner. That is the same kind of change as the host-side additions wasmtime merged
-  for `wasmtime serve` (#14294, #14320, #14390, #14392, September 2026), and this
-  repository already carries a patched dependency
-  (`pkg/wasm_tools/assets/wasm_builder.patch`), so carrying a runtime patch fits how
-  the project works.
+  `pkg/wasm_tools/lib/src/compiler/transform.dart` holds the mapping from the guest's
+  timezone-name lookup to `wasi:clocks/timezone@0.3.0` `iana-id` (the same code ships on
+  `origin/main`), but the link never fires in this build - this project resolves the
+  `dart.*` imports to embedder exports before the transform looks (see the timezone
+  attempt below). The interface itself is defined in the WIT wasmtime distributes
+  (`iana-id`, `utc-offset`, `to-debug-string`), still marked unstable in the WASI spec -
+  so a host implementation would serve an unstable interface. The host half could live
+  in either place: in `wasmtime-wasi`, where it would benefit every host, or in this
+  repo's runner - the cheaper change, but it serves only hosts using that runner. That
+  is the same kind of change as the host-side additions wasmtime merged for
+  `wasmtime serve` (#14294, #14320, #14390, #14392, September 2026), and this repository
+  already carries a patched dependency (`pkg/wasm_tools/assets/wasm_builder.patch`), so
+  carrying a runtime patch fits how the project works.
 - **Carry a timezone database in the guest.** Possible, but it means shipping megabytes of
   zone data inside every component, deciding how a zone is selected, and keeping it current
   as rules change.
 - **What ships today.** The name reports `UTC` and the offset `0`; the two agree with each
   other, which is what makes the fallback honest rather than misleading - a name like
   `UNKNOWN TZ` would contradict the offset reported beside it.
+
+### The timezone host attempt
+
+Serving `wasi:clocks/timezone@0.3.0` from this repo's Rust runner (`pkg/test_runner`),
+next to the existing custom instances for `wasm:dart/trace@1.0.0` and
+`wasm:dart/timeline@1.0.0`, was tried and reverted: the runner registered `iana-id` and
+`utc-offset`, with the zone taken from `TZ` or the system zone and the rules read from
+the system `zoneinfo` database. A component compiled from a program that reads
+`DateTime.now().timeZoneName` does not import `wasi:clocks/timezone` at all - its whole
+import list is `wasmdart:tests/result-collector`, `wasm:dart/trace@1.0.0`,
+`wasi:clocks/system-clock@0.3.0`, `wasi:cli/types@0.3.0`, `wasi:cli/stdout@0.3.0`,
+`wasi:clocks/monotonic-clock@0.3.0` - so the instance had nothing to serve. The reason
+is the guard on the transform's `wasi_iana_id` case: it links the host interface only
+when the module still imports `dart.timeZoneNameForClampedSeconds`, and this project's
+design resolves those `dart.*` imports to Dart embedder exports before the transform
+looks. The guest reads the embedder's constant instead. Real timezone support therefore
+needs a guest-side opt-in - the embedder's two exports asking a host, plus `iana-id`
+and `utc-offset` wired in the transform. That would make any component that reads a
+zone name require a host that serves the interface, which stock `wasmtime run` cannot,
+exactly as `wasm:dart/trace@1.0.0` already does for stack traces. That trade-off is the
+open decision, and it is not taken here. Left for follow-up: the module keeps reporting
+`UTC` with an offset of `0`, and those two agree.
 
 ## Status
 
