@@ -57,6 +57,21 @@ standalone runner for `wasmtime run`-style execution of arbitrary apps is follow
 For a component with a custom world (wit bindings and a link hook), see
 `pkg/wasm_tools/example/greeting`; for serving HTTP, `pkg/wasm_tools/example/http_service`.
 
+## Known limitations
+
+Wasmtime 47 enables the Wasm GC and exceptions proposals by default. GC types still
+cannot cross a component boundary, though: neither Wasmtime nor this repo's runtime
+implements GC integration with the component model, which the Bytecode Alliance names
+as the next functionality milestone, to be prototyped on "lazy value lowering"
+(["GC and Exceptions in Wasmtime"](https://bytecodealliance.org/articles/wasmtime-gc)).
+The interfaces this repo builds therefore speak the usual component-model types -
+strings lower to pointers and lengths into a linear memory - and a Dart component
+cannot hand a live Dart object to another component; data crossing an interface has
+to be marshalled, which is why components still carry a linear memory. Inside a
+component this does not bite: host imports use `externref` handles, so the Dart SDK
+module and the linked Dart embedder pass objects as opaque references. That is
+pinned to Wasmtime 47; a later release implementing lazy value lowering could lift it.
+
 ## Status
 
 This is a [full list of host imports](https://github.com/dart-lang/sdk/blob/main/sdk/lib/_internal/wasm/standalone/embedder.dart) we need to implement.
