@@ -17,8 +17,13 @@ The goal is to get `wasmtime run dart_compiled_app.wasm` to work without further
 > implement, so compiled components validated but could not run there. From `3.14.0-251.0.dev`
 > (commit `de942dbb`, *"[dart2wasm] Translate exceptions to try_table instructions"*) dart2wasm
 > emits `try_table`/`throw_ref` instead, and compiled components run under Wasmtime with no
-> special flags. Verified with Wasmtime 47.0.4: `wasmtime run` on
-> `pkg/wasm_tools/example/hello_world_wasi` prints the expected output and exits 0.
+> special flags **on a host that links the `wasm:dart/trace@1.0.0` stack-trace dependency every
+> component carries** (verified with Wasmtime 47.0.2 in the case suite's Rust runner). A stock
+> `wasmtime run` serves WASI only and rejects the component: dart2wasm keeps the SDK's
+> `dart.stackTrace*` imports reachable from core error paths (`Error._throw`, type checks), so
+> the compiler cannot stub the dependency away for apps that never read a [StackTrace] - the
+> stub path in the transform exists but never fires. A standalone command runner linking the
+> `wasm:dart/*` interfaces is follow-up work.
 >
 > `pkg/wasm_components/tool/run_cases.mjs` remains useful as a Rust-free way to run the case
 > suite in Node.
@@ -41,10 +46,16 @@ The main packages in this repository are:
 
 ## Demo
 
-Go to `examples/hello_world_custom`, run `dart run wasm_tools compile bin/app.dart`. This compiles
-`bin/app.dart` to `bin/app.wasm`.
+Go to `pkg/wasm_tools/example/hello_world_wasi`, run `dart run wasm_tools compile bin/app.dart`.
+This compiles `bin/app.dart` to `bin/app.wasm`.
 
-Run `cargo run` to run this app with Wasmtime.
+`bin/app.wasm` imports the `wasm:dart/trace@1.0.0` stack-trace dependency every component
+carries (see the note at the top), so run it with a host that links the `wasm:dart/*`
+interfaces - the case suite's Rust runner (`pkg/test_runner`) hosts the case components; a
+standalone runner for `wasmtime run`-style execution of arbitrary apps is follow-up work.
+
+For a component with a custom world (wit bindings and a link hook), see
+`pkg/wasm_tools/example/greeting`; for serving HTTP, `pkg/wasm_tools/example/http_service`.
 
 ## Status
 
@@ -53,8 +64,8 @@ This is a [full list of host imports](https://github.com/dart-lang/sdk/blob/main
 __Legend__:
 
 - 🎯: This can reasonably be implemented in Dart/WebAssembly without host imports.
-- 📦: This requires a host import (a WASI proposal).
-- 🛑: This is fundamentally unavailable and we can only provide stub imports.
+- 📦: This requires a host side: a WASI proposal or a component-level host import (e.g. `wasm:dart/trace@1.0.0`).
+- 🛑: This is fundamentally unavailable and we can only provide stub imports. The note names the blocker.
 
 | Method                                   | Implemented | Category | Notes                         |
 |------------------------------------------|-------------|----------|-------------------------------|
@@ -82,18 +93,18 @@ __Legend__:
 | stringToCodeUnits                        | ✅          | 🎯        |                               |
 | monotonicClockFrequency                  | ✅          | 📦        |                               |
 | monotonicClockTicks                      | ✅          | 📦        |                               |
-| weakRefCreate                            | ✅          | 🛑        | Strong ref stub; no GC yet    |
-| weakRefGet                               | ✅          | 🛑        | Strong ref stub; no GC yet    |
-| expandoCreate                            | ✅          | 🛑        | Backed by a list; no GC yet   |
-| expandoGet                               | ✅          | 🛑        | Backed by a list; no GC yet   |
-| expandoSet                               | ✅          | 🛑        | Backed by a list; no GC yet   |
-| finalizerCreate                          | ✅          | 🛑        | No-op stub; no GC yet         |
-| finalizerAttach                          | ✅          | 🛑        | No-op stub; no GC yet         |
-| finalizerDetach                          | ✅          | 🛑        | No-op stub; no GC yet         |
-| baseUri                                  | ✅          | 📦        | Fixed file:/// stub           |
-| isWindows                                | ✅          | 📦        | Always false                  |
-| stackTraceGetCurrent                     | ✅          | 🛑        | Host capture; stub if unused  |
-| stackTraceToString                       | ✅          | 🛑        | Renders the captured trace    |
+| weakRefCreate                            | ✅          | 🛑        | Stub: holds the target strongly; blocker: wasm GC gives the embedder no weak references |
+| weakRefGet                               | ✅          | 🛑        | Stub: reads the strong ref; blocker: wasm GC gives the embedder no weak references |
+| expandoCreate                            | ✅          | 🛑        | Stub: list-backed; blocker: without weak identity, keyed entries leak their targets |
+| expandoGet                               | ✅          | 🛑        | Stub: list-backed; blocker: without weak identity, keyed entries leak their targets |
+| expandoSet                               | ✅          | 🛑        | Stub: list-backed; blocker: without weak identity, keyed entries leak their targets |
+| finalizerCreate                          | ✅          | 🛑        | No-op stub; blocker: wasm GC has no finalization callback the embedder could attach |
+| finalizerAttach                          | ✅          | 🛑        | No-op stub; blocker: wasm GC has no finalization callback the embedder could attach |
+| finalizerDetach                          | ✅          | 🛑        | No-op stub; blocker: wasm GC has no finalization callback the embedder could attach |
+| baseUri                                  | ✅          | 🎯        | Build-time baked `file:` URL of the entry point's directory (`-Ddart.wasm.baseUri`); no host import |
+| isWindows                                | ✅          | 🎯        | Build-time baked host platform (`-Ddart.wasm.isWindows`); no host import |
+| stackTraceGetCurrent                     | ✅          | 📦        | Frames captured by the host (`wasm:dart/trace@1.0.0` `capture-utf16`) |
+| stackTraceToString                       | ✅          | 📦        | Host-rendered trace text via `wasm:dart/trace@1.0.0` |
 | doubleTryParse                           | ✅          | 🎯        |                               |
 | tryParseResultGetDouble                  | ✅          | 🎯        |                               |
 | doubleParseInfallible                    | ✅          | 🎯        |                               |
@@ -120,23 +131,23 @@ __Legend__:
 | regexpMatchGetNamedGroups                | ✅          | 🎯        |                               |
 | regexpMatchGetGroupName                  | ✅          | 🎯        |                               |
 | regexpMatchGetGroupByName                | ✅          | 🎯        |                               |
-| timeZoneNameForClampedSeconds            | ✅          | 📦        | Fixed `UTC` (no tz db)        |
-| timeZoneOffsetInSecondsForClampedSeconds | ✅          | 📦        | Always 0 (UTC; no tz db)      |
-| mathPow                                  | ✅          | 🎯        | Using `libm` in Rust.         |
-| mathAtan2                                | ✅          | 🎯        | Using `libm` in Rust.         |
-| mathSin                                  | ✅          | 🎯        | Using `libm` in Rust.         |
-| mathCos                                  | ✅          | 🎯        | Using `libm` in Rust.         |
-| mathTan                                  | ✅          | 🎯        | Using `libm` in Rust.         |
-| mathAcos                                 | ✅          | 🎯        | Using `libm` in Rust.         |
-| mathAsin                                 | ✅          | 🎯        | Using `libm` in Rust.         |
-| mathAtan                                 | ✅          | 🎯        | Using `libm` in Rust.         |
-| mathExp                                  | ✅          | 🎯        | Using `libm` in Rust.         |
-| mathLog                                  | ✅          | 🎯        | Using `libm` in Rust.         |
-| randomInt                                | ✅          | 📦        | Deterministic in raw module   |
-| randomIntSecure                          | ✅          | 📦        | Throws in raw module          |
-| print                                    | ✅          | 📦        | Via `wasi:cli/stdout`; completes under Wasmtime (e.g. `hello_world_wasi`) and in the raw-module harness |
+| timeZoneNameForClampedSeconds            | ✅          | 🛑        | Always `UTC` (stub); blocker: no tz db in the guest and wasmtime serves no `wasi:clocks/timezone` to query |
+| timeZoneOffsetInSecondsForClampedSeconds | ✅          | 🛑        | Always 0 (stub); blocker: no tz db in the guest and wasmtime serves no `wasi:clocks/timezone` to query |
+| mathPow                                  | ✅          | 🎯        | via the linked `runtime_helpers` wasm module (`libm`) |
+| mathAtan2                                | ✅          | 🎯        | via the linked `runtime_helpers` wasm module (`libm`) |
+| mathSin                                  | ✅          | 🎯        | via the linked `runtime_helpers` wasm module (`libm`) |
+| mathCos                                  | ✅          | 🎯        | via the linked `runtime_helpers` wasm module (`libm`) |
+| mathTan                                  | ✅          | 🎯        | via the linked `runtime_helpers` wasm module (`libm`) |
+| mathAcos                                 | ✅          | 🎯        | via the linked `runtime_helpers` wasm module (`libm`) |
+| mathAsin                                 | ✅          | 🎯        | via the linked `runtime_helpers` wasm module (`libm`) |
+| mathAtan                                 | ✅          | 🎯        | via the linked `runtime_helpers` wasm module (`libm`) |
+| mathExp                                  | ✅          | 🎯        | via the linked `runtime_helpers` wasm module (`libm`) |
+| mathLog                                  | ✅          | 🎯        | via the linked `runtime_helpers` wasm module (`libm`) |
+| randomInt                                | ✅          | 📦        | `wasi:random/insecure` in components; deterministic xorshift in raw modules |
+| randomIntSecure                          | ✅          | 📦        | `wasi:random/random` in components; throws where no secure source exists |
+| print                                    | ✅          | 📦        | Via `wasi:cli/stdout`; verified in the case suite's Rust runner and the raw-module harness |
 | jsonEncodeString                         | ✅          | 🎯        | JSON string escaping          |
-| debugger                                 | ✅          | 🛑        | No-op; no debugger attached   |
-| inspect                                  | ✅          | 🛑        | No-op; no debugger attached |
-| dartTimelineStreamEnabled                | ✅          | 🛑        | Always false                  |
-| reportTaskEvent                          | ✅          | 🛑        | No-op stub; events dropped    |
+| debugger                                 | ✅          | 🛑        | No-op stub; blocker: no debugger protocol exists for standalone components |
+| inspect                                  | ✅          | 🛑        | No-op stub; blocker: no debugger protocol exists for standalone components |
+| dartTimelineStreamEnabled                | ✅          | 📦        | On; events go to a host sink (`wasm:dart/timeline@1.0.0` `record-task-event`) |
+| reportTaskEvent                          | ✅          | 📦        | One NDJSON line per event on the host's stderr via `wasm:dart/timeline@1.0.0` |
