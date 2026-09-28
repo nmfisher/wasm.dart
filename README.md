@@ -84,9 +84,11 @@ timezone host call either, so the name always reports `UTC` and the offset a con
   to `wasi:clocks/timezone@0.3.0` `iana-id` (the same code ships on `origin/main`), and
   the interface itself is defined in the WIT wasmtime distributes (`iana-id`,
   `utc-offset`), still marked unstable in the WASI spec - so a host implementation would
-  serve an unstable interface. Only that host half is missing; implementing it in
-  `wasmtime-wasi` would give the guest its real zone and offset. That is the same kind of
-  change as the host-side additions wasmtime merged for `wasmtime serve`
+  serve an unstable interface. Only that host half is missing, and it could live in
+  either place: in `wasmtime-wasi`, where it would benefit every host, or in this repo's
+  runner - the cheaper change, but it serves only hosts using that runner. Either would
+  give the guest its real zone and offset. That is the same kind of change as the
+  host-side additions wasmtime merged for `wasmtime serve`
   (#14294, #14320, #14390, #14392, September 2026), and this repository already carries a
   patched dependency (`pkg/wasm_tools/assets/wasm_builder.patch`), so carrying a runtime
   patch fits how the project works.
