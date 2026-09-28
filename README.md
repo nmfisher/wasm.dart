@@ -72,6 +72,31 @@ component this does not bite: host imports use `externref` handles, so the Dart 
 module and the linked Dart embedder pass objects as opaque references. That is
 pinned to Wasmtime 47; a later release implementing lazy value lowering could lift it.
 
+The timezone imports are a runtime gap, not a dead end. The guest carries no timezone
+database, and no host serves it one: wasmtime's `wasmtime-wasi` clocks host implements
+just the wall/system and monotonic clocks, and this repo's Rust test runner adds no
+timezone host call either, so the name always reports `UTC` and the offset a constant
+`0`. Three routes out of that gap:
+
+- **Implement the interface in the host (recommended).** The compiler plumbing already
+  exists, and it is upstream's, not ours: the `wasi_iana_id` case in
+  `pkg/wasm_tools/lib/src/compiler/transform.dart` links the guest's timezone-name lookup
+  to `wasi:clocks/timezone@0.3.0` `iana-id` (the same code ships on `origin/main`), and
+  the interface itself is defined in the WIT wasmtime distributes (`iana-id`,
+  `utc-offset`), still marked unstable in the WASI spec - so a host implementation would
+  serve an unstable interface. Only that host half is missing; implementing it in
+  `wasmtime-wasi` would give the guest its real zone and offset. That is the same kind of
+  change as the host-side additions wasmtime merged for `wasmtime serve`
+  (#14294, #14320, #14390, #14392, September 2026), and this repository already carries a
+  patched dependency (`pkg/wasm_tools/assets/wasm_builder.patch`), so carrying a runtime
+  patch fits how the project works.
+- **Carry a timezone database in the guest.** Possible, but it means shipping megabytes of
+  zone data inside every component, deciding how a zone is selected, and keeping it current
+  as rules change.
+- **What ships today.** The name reports `UTC` and the offset `0`; the two agree with each
+  other, which is what makes the fallback honest rather than misleading - a name like
+  `UNKNOWN TZ` would contradict the offset reported beside it.
+
 ## Status
 
 This is a [full list of host imports](https://github.com/dart-lang/sdk/blob/main/sdk/lib/_internal/wasm/standalone/embedder.dart) we need to implement.
@@ -146,8 +171,8 @@ __Legend__:
 | regexpMatchGetNamedGroups                | ✅          | 🎯        |                               |
 | regexpMatchGetGroupName                  | ✅          | 🎯        |                               |
 | regexpMatchGetGroupByName                | ✅          | 🎯        |                               |
-| timeZoneNameForClampedSeconds            | ✅          | 🛑        | Always `UTC` (stub); blocker: no tz db in the guest and wasmtime serves no `wasi:clocks/timezone` to query |
-| timeZoneOffsetInSecondsForClampedSeconds | ✅          | 🛑        | Always 0 (stub); blocker: no tz db in the guest and wasmtime serves no `wasi:clocks/timezone` to query |
+| timeZoneNameForClampedSeconds            | ✅          | 🛑        | Always `UTC` (stub); blocker: no tz db in the guest, and wasmtime's `wasi:clocks/timezone` has no host implementation; see _Known limitations_ |
+| timeZoneOffsetInSecondsForClampedSeconds | ✅          | 🛑        | Always 0 (stub); blocker: no tz db in the guest, and wasmtime's `wasi:clocks/timezone` has no host implementation; see _Known limitations_ |
 | mathPow                                  | ✅          | 🎯        | via the linked `runtime_helpers` wasm module (`libm`) |
 | mathAtan2                                | ✅          | 🎯        | via the linked `runtime_helpers` wasm module (`libm`) |
 | mathSin                                  | ✅          | 🎯        | via the linked `runtime_helpers` wasm module (`libm`) |

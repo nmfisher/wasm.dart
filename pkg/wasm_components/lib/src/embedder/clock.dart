@@ -48,7 +48,9 @@ WasmStringImplementation wasiIanaId() {
   // `wasi:clocks/timezone.iana-id` host call this import was modeled on is
   // not implemented by wasmtime (its p3 clocks linker only serves the
   // wall/monotonic clock interfaces). So the id claims UTC, matching the
-  // offset that is always reported with it.
+  // offset that is always reported with it. Implementing `timezone` in
+  // wasmtime-wasi's host clocks would lift this; see the README's known
+  // limitations.
   return unknownTimezone;
 }
 
