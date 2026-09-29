@@ -71,16 +71,16 @@ __Legend__:
 | stringToCodeUnits                        | ✅          | 🎯        |                               |
 | monotonicClockFrequency                  | ✅          | 📦        |                               |
 | monotonicClockTicks                      | ✅          | 📦        |                               |
-| weakRefCreate                            |             | 🛑        |                               |
-| weakRefGet                               |             | 🛑        |                               |
-| expandoCreate                            |             | 🛑        |                               |
-| expandoGet                               |             | 🛑        |                               |
-| expandoSet                               |             | 🛑        |                               |
-| finalizerCreate                          |             | 🛑        |                               |
-| finalizerAttach                          |             | 🛑        |                               |
-| finalizerDetach                          |             | 🛑        |                               |
-| baseUri                                  | ✅          | 📦        | Stub used                     |
-| isWindows                                | ✅          | 📦        | Stub used                     |
+| weakRefCreate                            | ✅          | 🛑        | Strong ref stub; no GC yet    |
+| weakRefGet                               | ✅          | 🛑        | Strong ref stub; no GC yet    |
+| expandoCreate                            | ✅          | 🛑        | Backed by a list; no GC yet   |
+| expandoGet                               | ✅          | 🛑        | Backed by a list; no GC yet   |
+| expandoSet                               | ✅          | 🛑        | Backed by a list; no GC yet   |
+| finalizerCreate                          | ✅          | 🛑        | No-op stub; no GC yet         |
+| finalizerAttach                          | ✅          | 🛑        | No-op stub; no GC yet         |
+| finalizerDetach                          | ✅          | 🛑        | No-op stub; no GC yet         |
+| baseUri                                  | ✅          | 📦        | Fixed file:/// stub           |
+| isWindows                                | ✅          | 📦        | Always false                  |
 | stackTraceGetCurrent                     | ✅          | 🛑        | Impossible, stub used         |
 | stackTraceToString                       | ✅          | 🛑        | Impossible, stub used         |
 | doubleTryParse                           | ✅          | 🎯        |                               |
@@ -126,9 +126,9 @@ __Legend__:
 | print                                    | ✅          | 📦        | Via `wasi:cli/stdout`; requires an async component host |
 | jsonEncodeString                         | ✅          | 🎯        |                               |
 | debugger                                 |             | 🛑        |                               |
-| inspect                                  |             | 🛑        |                               |
-| dartTimelineStreamEnabled                |             | 🛑        |                               |
-| reportTaskEvent                          |             | 🛑        |                               |
+| inspect                                  | ✅          | 🛑        | No-op; no debugger attached |
+| dartTimelineStreamEnabled                | ✅          | 🛑        | Always false                  |
+| reportTaskEvent                          | ✅          | 🛑        | No-op stub; events dropped    |
 
 ## Component tests
 
