@@ -8,15 +8,21 @@ import 'dart:_wasm';
 
 import '../runtime/async/task.dart';
 import 'clock.dart';
-import 'constants.dart';
-import 'number_format.dart';
 import 'json_encode.dart';
+import 'number_format.dart';
 import 'regexp.dart';
 import 'stack_trace.dart';
 import 'string.dart';
 import 'string_buffer.dart';
 import 'tmp_print.dart';
 import 'utils.dart';
+
+// The dart.weak*/baseUri/isWindows exports live in [weak.dart]; this import
+// keeps them in the compiled module, exactly like the unused
+// `package:wasm_components` import in the generated bindings keeps this
+// file's own exports alive.
+// ignore: unused_import
+import 'weak.dart';
 
 Never _unsupportedAsyncSchedule() {
   throw StateError('Tried to schedule async operation, outside of async task.');
@@ -205,6 +211,46 @@ WasmExternRef? stringRepeat(WasmExternRef? string, WasmI32 amount) {
 }
 
 @pragma('wasm:export')
+WasmExternRef? stringReplaceAllString(
+  WasmExternRef? stringRef,
+  WasmExternRef? needleRef,
+  WasmExternRef? replacementRef,
+) {
+  final string = WasmStringImplementation.fromExtern(stringRef);
+  final needle = WasmStringImplementation.fromExtern(needleRef);
+  final replacement = WasmStringImplementation.fromExtern(replacementRef);
+
+  final len = string.length;
+  final nLen = needle.length;
+  final buffer = WasmStringBuffer();
+
+  if (nLen == 0) {
+    buffer.writeString(replacement);
+    for (var i = 0; i < len; i++) {
+      buffer
+        ..writeCharCode(string.codeUnitAtUnchecked(i))
+        ..writeString(replacement);
+    }
+    return buffer.renderToString().externalize();
+  }
+
+  var start = 0;
+  while (true) {
+    final idx = string.indexOfString(needle, start);
+    if (idx == -1) {
+      if (start == 0) return stringRef;
+      buffer.writeString(string.substring(start.toWasmI32(), len.toWasmI32()));
+      break;
+    }
+    buffer
+      ..writeString(string.substring(start.toWasmI32(), idx.toWasmI32()))
+      ..writeString(replacement);
+    start = idx + nLen;
+  }
+  return buffer.renderToString().externalize();
+}
+
+@pragma('wasm:export')
 WasmExternRef? stringReplaceRange(
   WasmExternRef? string,
   WasmI32 start,
@@ -264,18 +310,6 @@ WasmVoid stringToCodeUnits(
   final impl = WasmStringImplementation.fromExtern(string);
   impl.writeIntoCharArray(outArray, startIndex.toIntUnsigned(), 0, impl.length);
   return WasmVoid();
-}
-
-@pragma('wasm:export')
-WasmI32 isWindows() {
-  // This is only used for URI<->file path formatting, which is not relevant for
-  // WASI.
-  return const WasmI32(0);
-}
-
-@pragma('wasm:export')
-WasmExternRef? baseUri() {
-  return stubRootUri.externalize();
 }
 
 @pragma('wasm:export')
@@ -346,44 +380,57 @@ WasmVoid wasiPrint(WasmExternRef? string) {
   return WasmVoid();
 }
 
-@pragma('wasm:export')
-WasmExternRef? stringReplaceAllString(
-  WasmExternRef? stringRef,
-  WasmExternRef? needleRef,
-  WasmExternRef? replacementRef,
-) {
-  final string = WasmStringImplementation.fromExtern(stringRef);
-  final needle = WasmStringImplementation.fromExtern(needleRef);
-  final replacement = WasmStringImplementation.fromExtern(replacementRef);
+int _randomState = 0x9E3779B97F4A7C15;
 
-  final len = string.length;
-  final nLen = needle.length;
-  final buffer = WasmStringBuffer();
+@pragma('wasm:export', 'randomInt')
+WasmI64 randomInt() {
+  // Note: This function is recognized by the component compiler, which will
+  // add a dependency on wasi:random/insecure and replace this export with a
+  // get-insecure-random-u64 import. The xorshift64* fallback below only runs
+  // when the raw module is executed without that rewrite (e.g. in tests),
+  // where the runtime also draws its identityHashCode seed from here.
+  var x = _randomState;
+  x ^= x >> 12;
+  x ^= x << 25;
+  x ^= x >> 27;
+  _randomState = x;
+  return WasmI64.fromInt(x * 0x2545F4914F6CDD1D);
+}
 
-  if (nLen == 0) {
-    buffer.writeString(replacement);
-    for (var i = 0; i < len; i++) {
-      buffer
-        ..writeCharCode(string.codeUnitAtUnchecked(i))
-        ..writeString(replacement);
-    }
-    return buffer.renderToString().externalize();
-  }
+@pragma('wasm:export', 'randomIntSecure')
+WasmI64 randomIntSecure() {
+  // Note: This function is recognized by the component compiler, which will
+  // add a dependency on wasi:random/random and replace this export with a
+  // get-random-u64 import. Unlike [randomInt] there is no meaningful
+  // in-module fallback: secure randomness has to come from the host.
+  throw UnsupportedError('wasi:random/random not available');
+}
 
-  var start = 0;
-  while (true) {
-    final idx = string.indexOfString(needle, start);
-    if (idx == -1) {
-      if (start == 0) return stringRef;
-      buffer.writeString(string.substring(start.toWasmI32(), len.toWasmI32()));
-      break;
-    }
-    buffer
-      ..writeString(string.substring(start.toWasmI32(), idx.toWasmI32()))
-      ..writeString(replacement);
-    start = idx + nLen;
-  }
-  return buffer.renderToString().externalize();
+@pragma('wasm:export', 'currentTime')
+WasmI64 currentTimeMicros() {
+  return WasmI64.fromInt(wasiTimestampInMicroseconds());
+}
+
+@pragma("wasm:export", "timeZoneNameForClampedSeconds")
+WasmExternRef timeZoneNameForClampedSeconds(WasmI64 secondsSinceEpoch) {
+  // We can't get the time zone name without including a tz db in our modules.
+  // Instead, we return the (time-independent) id of the time zone.
+  return wasiIanaId().externalize();
+}
+
+@pragma('wasm:export', 'timeZoneOffsetInSecondsForClampedSeconds')
+WasmI32 timeZoneOffsetInSecondsForClampedSeconds(WasmI64 secondsSinceEpoch) {
+  return const WasmI32(0);
+}
+
+@pragma('wasm:export', 'monotonicClockFrequency')
+WasmI32 monotonicClockFrequency() {
+  return dartStopwatchTickFrequency.toWasmI32();
+}
+
+@pragma('wasm:export', 'monotonicClockTicks')
+WasmI64 monotonicClockTicks() {
+  return dartMonotonicTicks.toWasmI64();
 }
 
 @pragma('wasm:export')
@@ -468,47 +515,4 @@ WasmExternRef? regexpMatchGetGroupByName(
   WasmI32 nameIndex,
 ) {
   return embedderRegexpMatchGetGroupByName(match, nameIndex);
-}
-
-@pragma('wasm:export', 'randomInt')
-WasmI64 randomInt() {
-  // Note: This function is recognized by the component compiler, which will add
-  // a dependency on wasi:random/insecure to replace this function with a
-  // get-insecure-random-u64 import.
-  throw UnsupportedError('wasi:random/insecure not available');
-}
-
-@pragma('wasm:export', 'randomIntSecure')
-WasmI64 randomIntSecure() {
-  // Note: This function is recognized by the component compiler, which will add
-  // a dependency on wasi:random/insecure to replace this function with a
-  // get-random-u64 import.
-  throw UnsupportedError('wasi:random/random not available');
-}
-
-@pragma('wasm:export', 'currentTime')
-WasmI64 currentTimeMicros() {
-  return WasmI64.fromInt(wasiTimestampInMicroseconds());
-}
-
-@pragma("wasm:export", "timeZoneNameForClampedSeconds")
-WasmExternRef timeZoneNameForClampedSeconds(WasmI64 secondsSinceEpoch) {
-  // We can't get the time zone name without including a tz db in our modules.
-  // Instead, we return the (time-independent) id of the time zone.
-  return wasiIanaId().externalize();
-}
-
-@pragma('wasm:export', 'timeZoneOffsetInSecondsForClampedSeconds')
-WasmI32 timeZoneOffsetInSecondsForClampedSeconds(WasmI64 secondsSinceEpoch) {
-  return const WasmI32(0);
-}
-
-@pragma('wasm:export', 'monotonicClockFrequency')
-WasmI32 monotonicClockFrequency() {
-  return dartStopwatchTickFrequency.toWasmI32();
-}
-
-@pragma('wasm:export', 'monotonicClockTicks')
-WasmI64 monotonicClockTicks() {
-  return dartMonotonicTicks.toWasmI64();
 }
