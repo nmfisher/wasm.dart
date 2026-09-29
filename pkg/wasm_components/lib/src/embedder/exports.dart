@@ -12,6 +12,7 @@ import 'json_encode.dart';
 import 'number_format.dart';
 import 'regexp.dart';
 import 'stack_trace.dart';
+import 'stack_trace_capture.dart';
 import 'string.dart';
 import 'string_buffer.dart';
 import 'tmp_print.dart';
@@ -354,13 +355,28 @@ WasmExternRef stringBufferToString(WasmExternRef? buffer) {
 
 @pragma('wasm:export')
 WasmExternRef stackTraceGetCurrent() {
-  // WASI doesn't expose stack traces, so this is unimplemented.
-  return const UnsupportedStackTrace().externalize();
+  // The trace exists in the host (it owns the wasm stack), so the capture
+  // import asks the host to render it into linear memory. Without the
+  // `component.implicitImport_stackTraceCaptureUtf16` dependency - a program
+  // that never reads `StackTrace.current`, or a raw module without the
+  // rewrite - the transform stubs the capture and this falls back to the
+  // old constant, keeping the SDK-visible contract (a non-null externref)
+  // intact.
+  final captured = tryCaptureStackTrace();
+  if (captured == null) {
+    return const UnsupportedStackTrace().externalize();
+  }
+  return captured.externalize();
 }
 
 @pragma('wasm:export')
-WasmExternRef stackTraceToString(WasmExternRef? _) {
-  return stackTracesAreUnavailableMessage.externalize();
+WasmExternRef stackTraceToString(WasmExternRef? trace) {
+  // Render the string captured by `stackTraceGetCurrent` rather than
+  // capturing again: by the time the SDK calls this (from
+  // `_EmbedderStackTrace.toString`) the frames that `StackTrace.current`
+  // observed have returned, so a second capture would show only the toString
+  // machinery itself and lose the user's call chain.
+  return stackTraceToStringImpl(trace).externalize();
 }
 
 @pragma('wasm:export')

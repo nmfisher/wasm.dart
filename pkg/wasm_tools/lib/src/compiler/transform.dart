@@ -73,6 +73,8 @@ final class ModuleTransformer {
       'wasi_monotonic_now': _ClockImports(),
       'wasi_monotonic_getResolution': _ClockImports(),
       'wasi_monotonic_waitFor': _ClockImports(),
+      'stackTraceGetCurrent': _StackTraceImports(),
+      'stackTraceToString': _StackTraceImports(),
       'timelineStreamEnabled': _TimelineImports(),
       'reportTaskEvent': _TimelineImports(),
     };
@@ -778,6 +780,129 @@ final class _ClockImports extends _ComponentImport {
           parameters: [('how-long', SimpleAbiType.primitive(.u64))],
         );
     });
+  }
+}
+
+/// Rewrites the SDK's `dart.stackTrace*` imports into a capture dependency.
+///
+/// A stack trace of the running wasm exists only in the host - wasmtime walks
+/// its frame table, Node formats `Error().stack` - so the embedder's
+/// `stackTraceGetCurrent` asks the host to render the trace into linear
+/// memory and reads it back as a guest string. The `stackTraceToString` half
+/// of the SDK contract renders a captured trace; this embedder captures at
+/// `getCurrent` time and re-captures on `toString`, so both imports resolve
+/// to the same host capture function.
+///
+/// The guest side lives in `stack_trace_capture.dart` in pkg:wasm_components;
+/// its `component.implicitImport_stackTraceCaptureUtf16` import is declared
+/// there, like the stdout machinery this pattern follows.
+final class _StackTraceImports extends _ComponentImport {
+  const _StackTraceImports();
+
+  @override
+  bool addTo(
+    ProgramAbi abi,
+    ModuleTransformer transformer,
+    w.ImportedFunction function,
+  ) {
+    const captureImportName = 'implicitImport_stackTraceCaptureUtf16';
+
+    if (!_ComponentImport.functionUsed(transformer, 'stackTraceGetCurrent') &&
+        !_ComponentImport.functionUsed(transformer, 'stackTraceToString')) {
+      // The SDK patch hides its own frames, but dart2wasm only drops the
+      // `dart.stackTrace*` imports under DCE when no StackTrace is ever
+      // read, so both absent together means neither is used: stub the
+      // capture and keep no host dependency.
+      _stubStackTraceCapture(transformer, function);
+      return true;
+    }
+
+    final alreadyRegistered = abi.imports.any(
+      (import) => import.importName == captureImportName,
+    );
+    if (!alreadyRegistered) {
+      abi.imports.add(
+        ImportedFunction.exists(
+          importName: captureImportName,
+          // Memory + realloc are what let a host render the trace into guest
+          // linear memory through the component ABI: the canonical `string`
+          // return is written with the module's own allocator, so the host
+          // never needs a raw `(i32) -> i32` backdoor into the guest heap.
+          lowerOptions: const CanonicalOptions(
+            usesMemory: true,
+            usesString: true,
+            usesRealloc: true,
+          ),
+          // Resolved at link time: the module declares the import (the
+          // embedder's stack_trace_capture.dart), this entry only tells the
+          // ABI that the name is expected to be there.
+          resolve: ImportedFunction.importedFromInstance(
+            _stackTraceInterface(abi),
+            'capture-utf16',
+          ),
+        ),
+      );
+    }
+    return true;
+  }
+
+  /// The host interface carrying the capture function. Named like a WIT
+  /// package interface (`ns:package/interface@version`) so the component's
+  /// import is a valid extern name, versioned like the wasi interfaces the
+  /// other implicit dependencies use.
+  AbiInterface _stackTraceInterface(ProgramAbi abi) {
+    const fullName = 'wasm:dart/trace@1.0.0';
+    return abi.interfaces.putIfAbsent(fullName, () {
+      return AbiInterface(fullName)
+        ..exportedFunctions['capture-utf16'] = const AbiFunction(
+          parameters: [('capacity', SimpleAbiType.primitive(.u32))],
+          result: SimpleAbiType.string(),
+        );
+    });
+  }
+
+  /// A capture stub: writes a null pointer and zero length into the return
+  /// area the retptr call passed, i.e. "nothing captured" without touching
+  /// the allocator. Reading a null pointer back yields no string, so
+  /// `stackTraceGetCurrent` falls back to its constant.
+  void _stubStackTraceCapture(
+    ModuleTransformer transformer,
+    w.ImportedFunction importedFunction,
+  ) {
+    final type = importedFunction.type;
+    final memory = transformer.module.memories.imported.firstWhere(
+      (memory) => memory.module == 'libc' && memory.name == 'memory',
+    );
+    // The parameters, in order: the capture capacity (unused) and the
+    // address of the two-word return area.
+    final capacityLocal = w.Local(0, w.NumType.i32);
+    final returnAreaLocal = w.Local(1, w.NumType.i32);
+    final body = w.Instructions(
+      [capacityLocal, returnAreaLocal],
+      {},
+      [
+        // A null pointer and a zero length: nothing captured.
+        w.LocalGet(returnAreaLocal),
+        w.I32Const(0),
+        w.I32Store(w.MemoryOffsetAlign(memory, offset: 0, align: 2)),
+        w.LocalGet(returnAreaLocal),
+        w.I32Const(0),
+        w.I32Store(w.MemoryOffsetAlign(memory, offset: 4, align: 2)),
+        w.End(),
+      ],
+      null,
+      [],
+      null,
+    );
+    final stubFunction = w.DefinedFunction(
+      transformer.module,
+      body,
+      w.FinalizableIndex(),
+      type,
+      'stackTraceCaptureStub',
+    );
+    transformer.module.functions.defined.add(stubFunction);
+    transformer._patchFunctions[importedFunction] = stubFunction;
   }
 }
 
