@@ -40,8 +40,7 @@ void printImpl(WasmStringImplementation string) {
       // code point, or fall back to U+FFFD for an unpaired one.
       final next = i + 1 < length ? message.codeUnitAtUnchecked(i + 1) : 0;
       if (next >= 0xDC00 && next <= 0xDFFF) {
-        final codePoint =
-            0x10000 + ((unit - 0xD800) << 10) + (next - 0xDC00);
+        final codePoint = 0x10000 + ((unit - 0xD800) << 10) + (next - 0xDC00);
         bytes[count++] = 0xF0 | (codePoint >> 18);
         bytes[count++] = 0x80 | ((codePoint >> 12) & 0x3F);
         bytes[count++] = 0x80 | ((codePoint >> 6) & 0x3F);
@@ -94,8 +93,10 @@ final class _U8StreamVtable implements StreamVtable<Uint8List> {
 
   @override
   int allocateBuffer(int size) {
-    return mallocAligned(const WasmI32(1), WasmI32.fromInt(size))
-        .toIntUnsigned();
+    return mallocAligned(
+      const WasmI32(1),
+      WasmI32.fromInt(size),
+    ).toIntUnsigned();
   }
 
   @override

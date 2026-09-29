@@ -360,9 +360,7 @@ final class _PrintImports extends _ComponentImport {
     final stdoutInterface = abi.interfaces.putIfAbsent(stdoutName, () {
       return AbiInterface(stdoutName)
         ..exportedFunctions['write-via-stream'] = AbiFunction(
-          parameters: [
-            ('data', StreamAbiType(SimpleAbiType.primitive(.u8))),
-          ],
+          parameters: [('data', StreamAbiType(SimpleAbiType.primitive(.u8)))],
           result: FutureAbiType(ResultAbiType(error: errorCodeInStdout)),
         );
     });
@@ -386,7 +384,8 @@ final class _PrintImports extends _ComponentImport {
       CanonPrimitive Function(
         CoreFunctionIndex,
         component_types.ModelTypeReference,
-      ) create, {
+      )
+      create, {
       bool isAsync = false,
       bool usesMemory = false,
     }) {
@@ -402,8 +401,9 @@ final class _PrintImports extends _ComponentImport {
               StreamAbiType(SimpleAbiType.primitive(.u8)),
             );
 
-            final primitive = linker.component
-                .addCanonPrimitive((index) => create(index, streamType));
+            final primitive = linker.component.addCanonPrimitive(
+              (index) => create(index, streamType),
+            );
             if (primitive case final CanonicalHasOptions hasOptions) {
               options.applyTo(linker, hasOptions);
             }
@@ -413,10 +413,7 @@ final class _PrintImports extends _ComponentImport {
       );
     }
 
-    addStreamPrimitive(
-      'New',
-      (index, type) => StreamNew(index, type),
-    );
+    addStreamPrimitive('New', (index, type) => StreamNew(index, type));
     addStreamPrimitive(
       'Write',
       (index, type) => StreamWrite(index, type),
@@ -445,7 +442,8 @@ final class _PrintImports extends _ComponentImport {
       CanonPrimitive Function(
         CoreFunctionIndex,
         component_types.ModelTypeReference,
-      ) create, {
+      )
+      create, {
       bool isAsync = false,
       bool usesMemory = false,
     }) {
@@ -461,8 +459,9 @@ final class _PrintImports extends _ComponentImport {
               FutureAbiType(ResultAbiType(error: errorCodeInStdout)),
             );
 
-            final primitive = linker.component
-                .addCanonPrimitive((index) => create(index, futureType));
+            final primitive = linker.component.addCanonPrimitive(
+              (index) => create(index, futureType),
+            );
             if (primitive case final CanonicalHasOptions hasOptions) {
               options.applyTo(linker, hasOptions);
             }
