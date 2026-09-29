@@ -13,4 +13,11 @@ const Latin1String $0 = Latin1String.unsafeWrap(WasmArray.literal([48]));
 /// Char codes of `0123456789abcdefghijklmnopqrstuvwxyz`
 const WasmArray<WasmI8> digits = WasmArray.literal([48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122]);
 /// The string `UNKNOWN TZ`
-const Latin1String unknownTimezone = Latin1String.unsafeWrap(WasmArray.literal([85, 78, 75, 78, 79, 87, 78, 32, 84, 90]));
+/// The IANA-style id the embedder reports for the local time zone. The
+/// runtime always pairs it with a zero offset (`timeZoneOffsetInSecondsForClampedSeconds`
+/// in exports.dart is a constant), so the id claims UTC: a name like
+/// "UNKNOWN TZ" would disagree with the offset it is reported alongside.
+/// See [wasiIanaId] in clock.dart for why it cannot reflect the host zone.
+const Latin1String unknownTimezone = Latin1String.unsafeWrap(
+  WasmArray.literal([85, 84, 67]),
+);
