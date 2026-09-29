@@ -10,7 +10,10 @@ interface result-collector {
 interface tested-module {
   count-tests: func() -> u32;
 
-  invoke-test: func(number: u32);
+  /// Runs one test case. Async because a case may perform component-model
+  /// async work (print lowers to a wasi:cli/stdout stream write): the caller
+  /// keeps polling `callback` until the returned task has no waitables left.
+  invoke-test: async func(number: u32);
 }
 
 world root {
