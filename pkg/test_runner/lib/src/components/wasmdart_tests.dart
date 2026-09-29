@@ -9,5 +9,9 @@ abstract interface class ResultCollector {
 
 abstract interface class TestedModule {
   int countTests();
-  void invokeTest({required int number});
+
+  /// Runs one test case. Async because a case may perform component-model
+  /// async work (print lowers to a wasi:cli/stdout stream write): the caller
+  /// keeps polling `callback` until the returned task has no waitables left.
+  Future<void> invokeTest({required int number});
 }
