@@ -39,27 +39,29 @@ pub extern "C" fn dart_realloc(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn dart_free(ptr: *mut u8, num_bytes: usize, align: usize) {
-    // Talc requires a nonzero layout: it documents on `grow`/`shrink` that the
-    // caller must ensure the size is greater than zero, and a zero-size
-    // `dealloc` sends it a dangling pointer (see `dart_realloc`, which returns
-    // `align` for exactly this case). Zero-size blocks were never really
-    // allocated, so there is nothing to hand back.
+    // dart_realloc returns an aligned placeholder for a zero-size allocation,
+    // without allocating a block. Rust's dealloc requires an actual allocation
+    // with its original layout, so that placeholder must never reach it.
     if num_bytes == 0 {
         return;
     }
     unsafe { dealloc(ptr, Layout::from_size_align_unchecked(num_bytes, align)) }
 }
 
-#[cfg(test)]
+// These tests use the host system allocator; Wasm uses TALC in lib.rs.
+#[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     extern crate std;
 
     use super::dart_free;
     use core::alloc::{GlobalAlloc, Layout};
-    use core::sync::atomic::{AtomicUsize, Ordering};
+    use core::cell::Cell;
 
-    static DEALLOCS: AtomicUsize = AtomicUsize::new(0);
-    static ZERO_SIZE_DEALLOCS: AtomicUsize = AtomicUsize::new(0);
+    std::thread_local! {
+        // Constant initialization and no destructor keep allocator bookkeeping
+        // allocation-free. Each test observes only its own pointer and thread.
+        static OBSERVED: Cell<Option<(*mut u8, usize)>> = const { Cell::new(None) };
+    }
 
     /// Forwards to the system allocator but records what `dart_free` asked for,
     /// so a test can assert that zero-size blocks never reach the allocator.
@@ -71,10 +73,13 @@ mod tests {
         }
 
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            DEALLOCS.fetch_add(1, Ordering::SeqCst);
-            if layout.size() == 0 {
-                ZERO_SIZE_DEALLOCS.fetch_add(1, Ordering::SeqCst);
-            }
+            let _ = OBSERVED.try_with(|observed| {
+                if let Some((expected, count)) = observed.get() {
+                    if ptr == expected {
+                        observed.set(Some((expected, count + 1)));
+                    }
+                }
+            });
             unsafe { std::alloc::System.dealloc(ptr, layout) }
         }
     }
@@ -82,31 +87,23 @@ mod tests {
     #[global_allocator]
     static ALLOC: RecordingAlloc = RecordingAlloc;
 
-    /// The pointer `dart_realloc` hands back for a zero-size allocation is the
-    /// alignment value, which is what an empty `AllocatedString` frees.
-    fn dangling_zero_size_ptr(align: usize) -> *mut u8 {
-        align as *mut u8
+    fn count_frees(ptr: *mut u8, size: usize, align: usize) -> usize {
+        OBSERVED.with(|observed| observed.set(Some((ptr, 0))));
+        dart_free(ptr, size, align);
+        OBSERVED.with(|observed| observed.take().unwrap().1)
     }
 
     #[test]
     fn dart_free_ignores_zero_size_blocks() {
-        let ptr = dangling_zero_size_ptr(2);
-
-        DEALLOCS.store(0, Ordering::SeqCst);
-        ZERO_SIZE_DEALLOCS.store(0, Ordering::SeqCst);
-
-        dart_free(ptr, 0, 2);
-
-        assert_eq!(
-            DEALLOCS.load(Ordering::SeqCst),
-            0,
-            "a zero-size free must not reach the allocator"
-        );
-        assert_eq!(
-            ZERO_SIZE_DEALLOCS.load(Ordering::SeqCst),
-            0,
-            "talc requires a nonzero layout; a zero-size dealloc must never be attempted"
-        );
+        for align in [1, 2, 4, 8, 16] {
+            let ptr = super::dart_realloc(core::ptr::null_mut(), 0, align, 0);
+            assert_eq!(ptr as usize, align);
+            assert_eq!(
+                count_frees(ptr, 0, align),
+                0,
+                "a zero-size free must not reach the allocator"
+            );
+        }
     }
 
     #[test]
@@ -116,16 +113,10 @@ mod tests {
         let ptr = super::dart_realloc(core::ptr::null_mut(), 0, 2, 8);
         assert!(!ptr.is_null());
 
-        DEALLOCS.store(0, Ordering::SeqCst);
-        ZERO_SIZE_DEALLOCS.store(0, Ordering::SeqCst);
-
-        dart_free(ptr, 8, 2);
-
         assert_eq!(
-            DEALLOCS.load(Ordering::SeqCst),
+            count_frees(ptr, 8, 2),
             1,
             "a normal free must still reach the allocator"
         );
-        assert_eq!(ZERO_SIZE_DEALLOCS.load(Ordering::SeqCst), 0);
     }
 }
