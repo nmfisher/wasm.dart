@@ -52,7 +52,7 @@ __Legend__:
 | queueMicrotask                           | ✅          | 🎯        |                               |
 | clearSchedule                            | ✅          | 📦        |                               |
 | currentTimeMicros                        | ✅          | 📦        |                               |
-| stringFromCharCodeArray                  |             | 🎯        |                               |
+| stringFromCharCodeArray                  | ✅          | 🎯        |                               |
 | stringFromAsciiBytes                     | ✅          | 🎯        |                               |
 | stringLength                             | ✅          | 🎯        |                               |
 | stringEquals                             | ✅          | 🎯        |                               |
@@ -60,8 +60,8 @@ __Legend__:
 | stringCodeUnitAt                         | ✅          | 🎯        |                               |
 | stringIndexOfString                      | ✅          | 🎯        |                               |
 | stringLastIndexOfString                  | ✅          | 🎯        |                               |
-| stringReplaceAllString                   |             | 🎯        |                               |
-| stringReplaceAllRegExp                   |             | 🎯        |                               |
+| stringReplaceAllString                   | ✅          | 🎯        |                               |
+| stringReplaceAllRegExp                   | ✅          | 🎯        |                               |
 | stringSubstring                          | ✅          | 🎯        |                               |
 | stringToLowerCase                        | ✅          | 🎯        |                               |
 | stringToUpperCase                        | ✅          | 🎯        |                               |
@@ -83,32 +83,32 @@ __Legend__:
 | isWindows                                | ✅          | 📦        | Stub used                     |
 | stackTraceGetCurrent                     | ✅          | 🛑        | Impossible, stub used         |
 | stackTraceToString                       | ✅          | 🛑        | Impossible, stub used         |
-| doubleTryParse                           |             | 🎯        |                               |
-| tryParseResultGetDouble                  |             | 🎯        |                               |
-| doubleParseInfallible                    |             | 🎯        |                               |
+| doubleTryParse                           | ✅          | 🎯        |                               |
+| tryParseResultGetDouble                  | ✅          | 🎯        |                               |
+| doubleParseInfallible                    | ✅          | 🎯        |                               |
 | i64ToString                              | ✅          | 🎯        | Needs optimization for base10 |
 | f64ToExponential                         |             | 🎯        |                               |
 | f64ToExponentialWithFractionDigits       |             | 🎯        |                               |
 | f64ToPrecision                           |             | 🎯        |                               |
 | f64ToFixed                               |             | 🎯        |                               |
-| f64ToString                              |             | 🎯        | Currently a stub              |
+| f64ToString                              | ✅          | 🎯        |                               |
 | stringBufferCreate                       | ✅          | 🎯        |                               |
 | stringBufferWriteString                  | ✅          | 🎯        |                               |
 | stringBufferWriteCharCode                | ✅          | 🎯        |                               |
 | stringBufferClear                        | ✅          | 🎯        |                               |
 | stringBufferLength                       | ✅          | 🎯        |                               |
 | stringBufferToString                     | ✅          | 🎯        |                               |
-| regexpCreateOrFailWithString             |             | 🎯        | See [what Kotlin does](https://github.com/JetBrains/kotlin/tree/master/libraries/stdlib/native-wasm/src/kotlin/text/regex)          |
-| regexpIsRegexp                           |             | 🎯        |                               |
-| regexpEscape                             |             | 🎯        |                               |
-| regexpMatch                              |             | 🎯        |                               |
-| regexpMatchGetStart                      |             | 🎯        |                               |
-| regexpMatchGetEnd                        |             | 🎯        |                               |
-| regexpMatchGetGroupCount                 |             | 🎯        |                               |
-| regexpMatchGetGroup                      |             | 🎯        |                               |
-| regexpMatchGetNamedGroups                |             | 🎯        |                               |
-| regexpMatchGetGroupName                  |             | 🎯        |                               |
-| regexpMatchGetGroupByName                |             | 🎯        |                               |
+| regexpCreateOrFailWithString             | ✅          | 🎯        | Using `regex` crate in Rust.  |
+| regexpIsRegexp                           | ✅          | 🎯        | Using `regex` crate in Rust.  |
+| regexpEscape                             | ✅          | 🎯        |                               |
+| regexpMatch                              | ✅          | 🎯        | Using `regex` crate in Rust.  |
+| regexpMatchGetStart                      | ✅          | 🎯        | Using `regex` crate in Rust.  |
+| regexpMatchGetEnd                        | ✅          | 🎯        | Using `regex` crate in Rust.  |
+| regexpMatchGetGroupCount                 | ✅          | 🎯        | Using `regex` crate in Rust.  |
+| regexpMatchGetGroup                      | ✅          | 🎯        | Using `regex` crate in Rust.  |
+| regexpMatchGetNamedGroups                | ✅          | 🎯        | Using `regex` crate in Rust.  |
+| regexpMatchGetGroupName                  | ✅          | 🎯        | Using `regex` crate in Rust.  |
+| regexpMatchGetGroupByName                | ✅          | 🎯        | Using `regex` crate in Rust.  |
 | timeZoneNameForClampedSeconds            |             | 📦        | Unimplemented in wasmtime     |
 | timeZoneOffsetInSecondsForClampedSeconds |             | 📦        | Unimplemented in wasmtime     |
 | mathPow                                  | ✅          | 🎯        | Using `libm` in Rust.         |
@@ -129,6 +129,28 @@ __Legend__:
 | inspect                                  |             | 🛑        |                               |
 | dartTimelineStreamEnabled                |             | 🛑        |                               |
 | reportTaskEvent                          |             | 🛑        |                               |
+
+## Component tests
+
+The integration suite compiles `test/cases/*.dart` into components, executes them
+with the Rust/Wasmtime runner, and compares the output with Dart VM goldens.
+It exercises the component linker and the Rust runtime helper, including Talc.
+
+With a compatible Dart SDK and Rust/Cargo installed, run from the repository root:
+
+```sh
+dart pub get
+rustup toolchain install nightly --component rust-src
+./pkg/wasm_tools/tool/build_runtime_helpers.sh
+cd pkg/wasm_components
+dart test test/component_test.dart --reporter expanded
+```
+
+The helper build needs nightly Rust. The Dart SDK must support the standalone
+embedder APIs used by this checkout; Wasmtime execution also requires dart2wasm
+to emit standard exception instructions (`try_table`), available from
+`3.14.0-251.0.dev`. A sufficiently recent main-channel SDK can be used when the
+released SDKs are older.
 
 ## Print completion regression test
 
