@@ -24,9 +24,9 @@ final class DoubleParseFailure extends DoubleParseResult {
 ///   whitespace* sign digits ('.' digits)? exponent? whitespace*
 ///   exponent := ('e' | 'E') sign? digits
 ///
-/// An empty fraction part is *not* allowed ('1.' fails), and the whole
-/// string must be consumed. This is stricter than JavaScript's parseFloat
-/// and matches the VM.
+/// A trailing decimal point is allowed ('1.' parses), but the whole string
+/// must be consumed. This is stricter than JavaScript's parseFloat and
+/// matches the VM.
 DoubleParseResult tryParseDouble(WasmStringImplementation source) {
   final length = source.length;
   var index = 0;
@@ -134,12 +134,7 @@ DoubleParseResult tryParseDouble(WasmStringImplementation source) {
           source.codeUnitAtUnchecked(firstSignificant) == 0x30) {
         firstSignificant++;
       }
-      exponent = _parseSmallInt(
-        source,
-        firstSignificant,
-        eIndex,
-        eNegative,
-      );
+      exponent = _parseSmallInt(source, firstSignificant, eIndex, eNegative);
       explicitExponentDigits = eIndex - firstSignificant;
       index = eIndex;
     }
@@ -278,7 +273,9 @@ DoubleParseSuccess? _matchSpecialValue(
     return const DoubleParseSuccess(double.nan);
   }
   if (matchesWord('Infinity')) {
-    return DoubleParseSuccess(negative ? double.negativeInfinity : double.infinity);
+    return DoubleParseSuccess(
+      negative ? double.negativeInfinity : double.infinity,
+    );
   }
   return null;
 }

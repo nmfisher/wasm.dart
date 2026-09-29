@@ -101,12 +101,17 @@ WasmExternRef f64ToString(WasmF64 value) {
 
 @pragma('wasm:export')
 WasmExternRef f64ToExponential(WasmF64 value) {
-  return doubleToExponentialWithFractionDigits(value.toDouble(), -1)
-      .externalize();
+  return doubleToExponentialWithFractionDigits(
+    value.toDouble(),
+    -1,
+  ).externalize();
 }
 
 @pragma('wasm:export')
-WasmExternRef f64ToExponentialWithFractionDigits(WasmF64 value, WasmI32 digits) {
+WasmExternRef f64ToExponentialWithFractionDigits(
+  WasmF64 value,
+  WasmI32 digits,
+) {
   return doubleToExponentialWithFractionDigits(
     value.toDouble(),
     digits.toIntSigned(),
@@ -115,8 +120,10 @@ WasmExternRef f64ToExponentialWithFractionDigits(WasmF64 value, WasmI32 digits) 
 
 @pragma('wasm:export')
 WasmExternRef f64ToPrecision(WasmF64 value, WasmI32 digits) {
-  return doubleToPrecision(value.toDouble(), digits.toIntSigned())
-      .externalize();
+  return doubleToPrecision(
+    value.toDouble(),
+    digits.toIntSigned(),
+  ).externalize();
 }
 
 @pragma('wasm:export')
@@ -142,8 +149,7 @@ WasmExternRef? doubleTryParse(WasmExternRef? string) {
 
 @pragma('wasm:export')
 WasmF64 tryParseResultGetDouble(WasmExternRef? parseResult) {
-  final result =
-      parseResult!.internalize().toObject() as _DoubleTryParseResult;
+  final result = parseResult!.internalize().toObject() as _DoubleTryParseResult;
   return WasmF64.fromDouble(result.value);
 }
 

@@ -87,10 +87,7 @@ Latin1String doubleToExponentialWithFractionDigits(
   double value,
   int fractionDigits,
 ) {
-  return doubleToExponential(
-    value,
-    fractionDigits < 0 ? null : fractionDigits,
-  );
+  return doubleToExponential(value, fractionDigits < 0 ? null : fractionDigits);
 }
 
 /// Shortest-exponential variant of [doubleToExponentialWithFractionDigits].
@@ -231,10 +228,7 @@ _Digits _shortestDigits(double value) {
     text = text.substring(0, count);
   }
   // Keep the value identical: 0.digits * 10^(exponent + count).
-  return _Digits(
-    text,
-    digits.exponent + originalCount - count,
-  );
+  return _Digits(text, digits.exponent + originalCount - count);
 }
 
 /// Parses `0.digits * 10^(exponent + count)` back into a double with
@@ -286,10 +280,8 @@ double decimalFractionToDouble(BigInt mantissa, int shift) {
   // lies in [2^52, 2^53), so the result is either a 53-bit number or
   // exactly 2^53 (a carry into the next binade).
   final scale = 52 - e;
-  final scaledNumerator =
-      scale >= 0 ? numerator << scale : numerator;
-  final scaledDenominator =
-      scale >= 0 ? denominator : denominator << -scale;
+  final scaledNumerator = scale >= 0 ? numerator << scale : numerator;
+  final scaledDenominator = scale >= 0 ? denominator : denominator << -scale;
   var m = _roundHalfEven(scaledNumerator, scaledDenominator);
   var exponent = e;
   if (m.bitLength == 54) {
@@ -372,8 +364,8 @@ _Digits _roundedDigits(double value, int precision, {bool tiesEven = false}) {
   // log10(value) = log10(mantissa) + exponent * log10(2). Estimate with
   // fixed point math (0x4d10/0x10000 ~ log10(2)), then correct with exact
   // integer comparisons.
-  var estimate = ((mantissa.bitLength * 0x4d10) >> 16) +
-      ((exponent * 0x4d10) >> 16);
+  var estimate =
+      ((mantissa.bitLength * 0x4d10) >> 16) + ((exponent * 0x4d10) >> 16);
   while (_atLeastPow10(mantissa, exponent, estimate + 1)) {
     estimate++;
   }
@@ -424,11 +416,7 @@ BigInt _roundDecimal(
   if (binaryShift >= 0) {
     return _divRound(mantissa << binaryShift, denominator, tiesEven: tiesEven);
   }
-  return _divRound(
-    mantissa,
-    denominator << -binaryShift,
-    tiesEven: tiesEven,
-  );
+  return _divRound(mantissa, denominator << -binaryShift, tiesEven: tiesEven);
 }
 
 /// `numerator ~/ denominator` rounded to the nearest integer, ties rounded
@@ -442,8 +430,7 @@ BigInt _divRound(
   final remainder = numerator - quotient * denominator;
   final twiceRemainder = remainder << 1;
   if (twiceRemainder > denominator ||
-      (twiceRemainder == denominator &&
-          (tiesEven ? quotient.isOdd : true))) {
+      (twiceRemainder == denominator && (tiesEven ? quotient.isOdd : true))) {
     return quotient + BigInt.one;
   }
   return quotient;
@@ -468,8 +455,7 @@ bool _atLeastPow10(BigInt mantissa, int exponent, int decimalExponent) {
     return (mantissa << exponent) >= _pow10(decimalExponent);
   }
   // 2^-exponent = 5^-exponent / 10^-exponent.
-  return (mantissa * _pow5(-exponent)) >=
-      _pow10(decimalExponent - exponent);
+  return (mantissa * _pow5(-exponent)) >= _pow10(decimalExponent - exponent);
 }
 
 final Map<int, BigInt> _pow10Cache = {};
@@ -477,18 +463,12 @@ final Map<int, BigInt> _pow5Cache = {};
 
 BigInt _pow10(int exponent) {
   if (exponent < 0) return BigInt.one;
-  return _pow10Cache.putIfAbsent(
-    exponent,
-    () => BigInt.from(10).pow(exponent),
-  );
+  return _pow10Cache.putIfAbsent(exponent, () => BigInt.from(10).pow(exponent));
 }
 
 BigInt _pow5(int exponent) {
   if (exponent < 0) return BigInt.one;
-  return _pow5Cache.putIfAbsent(
-    exponent,
-    () => BigInt.from(5).pow(exponent),
-  );
+  return _pow5Cache.putIfAbsent(exponent, () => BigInt.from(5).pow(exponent));
 }
 
 /// The `d.ddd` body of an exponential rendering (no sign, no exponent).

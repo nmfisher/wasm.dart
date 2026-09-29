@@ -101,6 +101,8 @@ void _roundTrip(BaseResultCollector collector) {
     '2.2250738585072014e-308',
   ]) {
     final v = double.parse(s);
-    collector.recordBool(e: v.toString() == s || double.parse(v.toString()) == v);
+    collector.recordBool(
+      e: v.toString() == s || double.parse(v.toString()) == v,
+    );
   }
 }
