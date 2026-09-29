@@ -30,9 +30,13 @@ async fn async_main() -> Result<()> {
     config.wasm_function_references(true);
     config.wasm_exceptions(true);
     // The test export is an async component function: driving its task
-    // (print lowers to a wasi:cli/stdout stream write) needs the concurrent
+    // (print lowers to a wasi:cli/stdout stream write, a timer lowers to a
+    // wasi:clocks/monotonic-clock wait-for subtask) needs the concurrent
     // component API.
     config.wasm_component_model_async(true);
+    // Timers are wait-for subtasks: without this the clock import is a
+    // stub returning an error.
+    config.wasm_component_model_more_async_builtins(true);
 
     let engine = wasmtime::Engine::new(&config)?;
     let mut store = Store::new(

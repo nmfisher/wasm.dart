@@ -41,6 +41,6 @@ final class _ExportTestModule(final List<TestCase> cases, RootImports imports)
     // The generated wrapper creates a task and drains its pending print
     // writes before reporting the async export's result to the host.
     final run = cases[number];
-    run(_collector);
+    await run(_collector);
   }
 }
