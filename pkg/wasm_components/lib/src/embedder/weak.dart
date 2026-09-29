@@ -7,8 +7,48 @@ library;
 // ignore: import_internal_library
 import 'dart:_wasm';
 
+import 'libc.dart' as libc;
 import 'string.dart';
 import 'utils.dart';
+
+/// Writes a string's UTF-16 code units into linear memory for a canonical
+/// `(pointer, length)` crossing.
+///
+/// Canonical `string` imports pass the characters through the module's own
+/// linear memory; the units must stay alive until the host has copied them,
+/// so the allocation is freed only after the call returned (see
+/// [_freeUnits]).
+final class _EncodedUnits {
+  final WasmI32 ptr;
+  final WasmI32 packedLength;
+
+  _EncodedUnits(this.ptr, this.packedLength);
+}
+
+_EncodedUnits _writeUnits(WasmStringImplementation source) {
+  final length = source.length;
+  final ptr = libc.mallocAligned(
+    const WasmI32(2),
+    WasmI32.fromInt(2 * length),
+  );
+  final address = ptr.toIntUnsigned();
+  for (var i = 0; i < length; i++) {
+    libc.memory.storeInt16(
+      address + 2 * i,
+      WasmI32.uint16FromInt(source.codeUnitAtUnchecked(i)),
+      align: 1,
+      );
+  }
+  return _EncodedUnits(ptr, WasmI32.fromInt(length));
+}
+
+void _freeUnits(_EncodedUnits units) {
+  libc.dartFree(
+    units.ptr,
+    WasmI32.fromInt(2 * units.packedLength.toIntSigned()),
+    const WasmI32(2),
+  );
+}
 
 /// One entry of the stub expando: an object target (compared by identity)
 /// and the value associated with it.
@@ -152,16 +192,39 @@ const String _baseUri = String.fromEnvironment('dart.wasm.baseUri');
 /// Whether the build ran on Windows, written by the compiler.
 const bool _isWindows = bool.fromEnvironment('dart.wasm.isWindows');
 
-/// (`dart.timelineStreamEnabled`) Reports that no timeline stream is
-/// listened to, which keeps `dart:developer`'s Timeline helpers from
-/// calling [reportTaskEvent] at all.
+/// (`dart.timelineStreamEnabled`) Reports that the timeline stream is
+/// listened to: events flow to a real sink, a host import whose events the
+/// wasm hosts write as one NDJSON line each onto their stderr.
 @pragma('wasm:export')
 WasmI32 timelineStreamEnabled() {
-  return WasmI32.fromBool(false);
+  return WasmI32.fromBool(true);
 }
 
-/// (`dart.reportTaskEvent`) Only reachable when a timeline stream is
-/// enabled, which [timelineStreamEnabled] never reports; drops the event.
+/// The host sink for timeline events, as the core module sees it.
+///
+/// The SDK import takes the strings as externrefs (`dart.reportTaskEvent`
+/// is a module import and never crosses the component boundary), so this
+/// component-level sink takes them canonically: flat u8 event type and
+/// `(pointer, length)` UTF-16 pairs in the module's linear memory. The
+/// host-side sink writes one NDJSON line per event to its stderr - wasm
+/// hosts have no other channel that never mixes with the goldens.
+@pragma('wasm:import', 'component.implicitImport_timelineReportTaskEvent')
+external WasmI32 _timelineReportTaskEvent(
+  WasmI32 type,
+  WasmI32 taskId,
+  WasmI32 flowId,
+  WasmI32 namePtr,
+  WasmI32 nameLengthUnits,
+  WasmI32 argsPtr,
+  WasmI32 argsLengthUnits,
+);
+
+/// (`dart.reportTaskEvent`) Forwards the event to the host sink, converting
+/// the SDK's externref strings into the canonical `(pointer, length)` pairs
+/// the component interface carries.
+///
+/// The host returns whether the event was recorded; the embedder passes it
+/// through unchanged (the VM's `_reportTaskEvent` also just records).
 @pragma('wasm:export')
 WasmI32 reportTaskEvent(
   WasmI32 taskId,
@@ -170,7 +233,22 @@ WasmI32 reportTaskEvent(
   WasmExternRef? name,
   WasmExternRef? argumentsAsJson,
 ) {
-  return WasmI32.fromBool(false);
+  final nameString = WasmStringImplementation.fromExtern(name);
+  final argumentsString = WasmStringImplementation.fromExtern(argumentsAsJson);
+  final namePtr = _writeUnits(nameString);
+  final argsPtr = _writeUnits(argumentsString);
+  final recorded = _timelineReportTaskEvent(
+    type,
+    taskId,
+    flowId,
+    namePtr.ptr,
+    namePtr.packedLength,
+    argsPtr.ptr,
+    argsPtr.packedLength,
+  );
+  _freeUnits(namePtr);
+  _freeUnits(argsPtr);
+  return recorded;
 }
 
 /// (`dart.inspect`) No debugger can be attached in this embedder; the
