@@ -17,4 +17,7 @@
 {"type":"end","test":2}
 {"type":"start","test":3}
 {"type":"bool","value":true}
+{"type":"bool","value":true}
+{"type":"bool","value":true}
+{"type":"bool","value":true}
 {"type":"end","test":3}

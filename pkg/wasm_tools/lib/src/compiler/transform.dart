@@ -73,6 +73,8 @@ final class ModuleTransformer {
       'wasi_monotonic_now': _ClockImports(),
       'wasi_monotonic_getResolution': _ClockImports(),
       'wasi_monotonic_waitFor': _ClockImports(),
+      'timelineStreamEnabled': _TimelineImports(),
+      'reportTaskEvent': _TimelineImports(),
     };
 
     // First pass: run the replacers for all `dart.*` imports before anything
@@ -85,13 +87,31 @@ final class ModuleTransformer {
       }
     }
 
+    // The timeline replacer has one duty the loop above cannot reach: the
+    // embedder's `component.implicitImport_timelineReportTaskEvent` import
+    // is declared in every module (its source is always compiled in), but
+    // when dart2wasm's DCE removed both `dart.*` timeline imports there is
+    // no `dart.*` import left to run the replacer with. Decide on the
+    // embedder's behalf: with the SDK entries present the dependency was
+    // registered above; without them the declared import is rewired to a
+    // stub so the component stays free of an unused host dependency.
+    const timelineReplacer = _TimelineImports();
+    if (!_ComponentImport.functionUsed(this, 'timelineStreamEnabled') &&
+        !_ComponentImport.functionUsed(this, 'reportTaskEvent')) {
+      final declared = module.imports.functions.firstWhere(
+        (import) =>
+            import.module == 'component' &&
+            import.name == 'implicitImport_timelineReportTaskEvent',
+      );
+      timelineReplacer._stubTimelineReport(this, declared);
+    }
+
     final unusedComponentImports = {
       for (final import in abi.imports) import.importName,
     };
 
     for (final import in module.imports.all.toList()) {
       if (import is w.ImportedFunction &&
-          import.module == 'dart' &&
           _patchFunctions.containsKey(import)) {
         // The import was replaced by a stub or by an ABI import in the first
         // pass; the actual rewrite happens below.
@@ -312,6 +332,15 @@ abstract base class _ComponentImport {
     ModuleTransformer transformer,
     w.ImportedFunction function,
   );
+
+  /// Whether the module still imports `dart.<name>`: dart2wasm only drops
+  /// those imports under DCE when the corresponding SDK entry point is
+  /// unused, so their presence is the "is this feature used" signal.
+  static bool functionUsed(ModuleTransformer transformer, String name) {
+    return transformer.module.imports.functions.any(
+      (e) => e.module == 'dart' && e.name == name,
+    );
+  }
 }
 
 /// Rewrites the `dart.print` import into a `wasi:cli/stdout` dependency.
@@ -588,7 +617,7 @@ final class _ClockImports extends _ComponentImport {
 
     switch (function.name) {
       case 'wasi_now':
-        if (!_functionUsed(transformer, 'currentTime')) {
+        if (!_ComponentImport.functionUsed(transformer, 'currentTime')) {
           _stubPtr(transformer, function);
           break;
         }
@@ -604,7 +633,7 @@ final class _ClockImports extends _ComponentImport {
           ),
         );
       case 'wasi_iana_id':
-        if (!_functionUsed(transformer, 'timeZoneNameForClampedSeconds')) {
+        if (!_ComponentImport.functionUsed(transformer, 'timeZoneNameForClampedSeconds')) {
           _stubPtr(transformer, function);
           break;
         }
@@ -624,7 +653,7 @@ final class _ClockImports extends _ComponentImport {
           ),
         );
       case 'wasi_monotonic_now':
-        if (!_functionUsed(transformer, 'monotonicClockTicks')) {
+        if (!_ComponentImport.functionUsed(transformer, 'monotonicClockTicks')) {
           _stubReturningI64(transformer, function);
           break;
         }
@@ -639,8 +668,8 @@ final class _ClockImports extends _ComponentImport {
           ),
         );
       case 'wasi_monotonic_getResolution':
-        if (!_functionUsed(transformer, 'monotonicClockFrequency') &&
-            !_functionUsed(transformer, 'monotonicClockTicks')) {
+        if (!_ComponentImport.functionUsed(transformer, 'monotonicClockFrequency') &&
+            !_ComponentImport.functionUsed(transformer, 'monotonicClockTicks')) {
           _stubReturningI64(transformer, function);
           break;
         }
@@ -671,12 +700,6 @@ final class _ClockImports extends _ComponentImport {
     }
 
     return true;
-  }
-
-  bool _functionUsed(ModuleTransformer transformer, String name) {
-    return transformer.module.imports.functions.any(
-      (e) => e.module == 'dart' && e.name == name,
-    );
   }
 
   /// Replaces the `wasiNowPtr()` import with a stub to avoid dependencies.
@@ -756,5 +779,116 @@ final class _ClockImports extends _ComponentImport {
           parameters: [('how-long', SimpleAbiType.primitive(.u64))],
         );
     });
+  }
+}
+
+/// Rewrites the `dart.timelineStreamEnabled`/`dart.reportTaskEvent` imports
+/// into a `wasm:dart/timeline` host dependency.
+///
+/// The stream-enabled answer lives in the embedder export (always `true`,
+/// see `weak.dart`); `reportTaskEvent` stays a same-name embedder export
+/// that adapts the SDK's externref strings into the canonical
+/// `(pointer, length)` pairs the host interface carries. This replacer
+/// registers that host dependency. The embedder source is always compiled
+/// in (it is exported), so its
+/// `component.implicitImport_timelineReportTaskEvent` import is declared
+/// whether or not dart2wasm's DCE kept the SDK's `dart.*` timeline imports
+/// - when both are gone nothing can produce an event, and the declared
+/// import is rewired to a stub answering "not recorded" so the component
+/// keeps no host dependency it cannot use.
+final class _TimelineImports extends _ComponentImport {
+  const _TimelineImports();
+
+  @override
+  bool addTo(
+    ProgramAbi abi,
+    ModuleTransformer transformer,
+    w.ImportedFunction function,
+  ) {
+    const reportImportName = 'implicitImport_timelineReportTaskEvent';
+
+    if (!_ComponentImport.functionUsed(transformer, 'timelineStreamEnabled') &&
+        !_ComponentImport.functionUsed(transformer, 'reportTaskEvent')) {
+      _stubTimelineReport(transformer, function);
+      return true;
+    }
+
+    final alreadyRegistered = abi.imports.any(
+      (import) => import.importName == reportImportName,
+    );
+    if (!alreadyRegistered) {
+      abi.imports.add(
+        ImportedFunction.exists(
+          importName: reportImportName,
+          // The two strings arrive as `(pointer, length)` UTF-16 pairs in
+          // the module's linear memory, so the canonical lowering needs the
+          // memory (and string-encoding) options - no realloc: the guest
+          // allocated the units itself and frees them after the call.
+          lowerOptions: const CanonicalOptions(
+            usesMemory: true,
+            usesString: true,
+          ),
+          // Resolved at link time: the module declares the import (the
+          // embedder's weak.dart), this entry only tells the ABI that the
+          // name is expected to be there.
+          resolve: ImportedFunction.importedFromInstance(
+            _timelineInterface(abi),
+            'record-task-event',
+          ),
+        ),
+      );
+    }
+    return true;
+  }
+
+  /// The host interface carrying the event sink. Named like a WIT package
+  /// interface (`ns:package/interface@version`) so the component's import
+  /// is a valid extern name, versioned like the wasi interfaces the other
+  /// implicit dependencies use.
+  AbiInterface _timelineInterface(ProgramAbi abi) {
+    const fullName = 'wasm:dart/timeline@1.0.0';
+    return abi.interfaces.putIfAbsent(fullName, () {
+      return AbiInterface(fullName)
+        ..exportedFunctions['record-task-event'] = const AbiFunction(
+          parameters: [
+            ('event-type', SimpleAbiType.primitive(.u8)),
+            ('task-id', SimpleAbiType.primitive(.s32)),
+            ('flow-id', SimpleAbiType.primitive(.s32)),
+            ('name', SimpleAbiType.string()),
+            ('arguments-as-json', SimpleAbiType.string()),
+          ],
+          result: SimpleAbiType.primitive(.bool),
+        );
+    });
+  }
+
+  /// A stub answering `false` ("not recorded") with the shape the embedder
+  /// expects: the event type, ids and the two `(pointer, length)` string
+  /// pairs are all ignored, so no memory is touched and nothing is freed.
+  void _stubTimelineReport(
+    ModuleTransformer transformer,
+    w.ImportedFunction importedFunction,
+  ) {
+    final type = importedFunction.type;
+    final params = [
+      for (var i = 0; i < type.inputs.length; i++) w.Local(i, w.NumType.i32),
+    ];
+    final body = w.Instructions(
+      params,
+      {},
+      [w.I32Const(0), w.End()],
+      null,
+      [],
+      null,
+    );
+    final stubFunction = w.DefinedFunction(
+      transformer.module,
+      body,
+      w.FinalizableIndex(),
+      type,
+      'timelineReportStub',
+    );
+    transformer.module.functions.defined.add(stubFunction);
+    transformer._patchFunctions[importedFunction] = stubFunction;
   }
 }

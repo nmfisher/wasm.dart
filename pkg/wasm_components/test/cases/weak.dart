@@ -47,4 +47,14 @@ void _finalizers(BaseResultCollector collector) {
 
 void _baseUriAndPlatform(BaseResultCollector collector) {
   collector.recordBool(e: Uri.base.toString().isNotEmpty);
+  // `Uri.file` branches on the platform the embedder reports. On POSIX
+  // (`isWindows` false) a backslash path is a relative URL whose `:` and `\`
+  // come out percent-escaped (a Windows branch would keep them literal and
+  // treat `C:` as the drive), and a `/`-rooted path becomes an absolute
+  // `file:///` URL.
+  final windows = Uri.file(r'C:\x\y');
+  collector.recordBool(e: windows.path.contains('%3A'));
+  collector.recordBool(e: windows.path.contains('%5C'));
+  final abs = Uri.file('/x/y');
+  collector.recordBool(e: abs.scheme == 'file' && abs.isAbsolute);
 }
