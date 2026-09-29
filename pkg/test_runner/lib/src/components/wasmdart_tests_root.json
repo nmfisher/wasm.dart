@@ -63,6 +63,21 @@
         "is_async": false,
         "uses_callback": false
       }
+    },
+    {
+      "import_name": "_component_1taskReturn",
+      "definition": {
+        "TaskReturn": {
+          "result_list": []
+        }
+      },
+      "lower_options": {
+        "uses_memory": false,
+        "uses_strings": false,
+        "uses_realloc": false,
+        "is_async": false,
+        "uses_callback": false
+      }
     }
   ],
   "exports": [
@@ -87,8 +102,8 @@
             "uses_memory": false,
             "uses_strings": false,
             "uses_realloc": false,
-            "is_async": false,
-            "uses_callback": false
+            "is_async": true,
+            "uses_callback": true
           },
           "parameters": [
             {
@@ -182,13 +197,16 @@
           },
           "invoke-test": {
             "name": "invoke-test",
-            "kind": "freestanding",
+            "kind": "async-freestanding",
             "params": [
               {
                 "name": "number",
                 "type": "u32"
               }
-            ]
+            ],
+            "docs": {
+              "contents": "Runs one test case and waits for pending Dart print writes before\nreporting completion to the host."
+            }
           }
         },
         "package": 0

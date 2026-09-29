@@ -37,7 +37,10 @@ final class _ExportTestModule(final List<TestCase> cases, RootImports imports)
   int countTests() => cases.length;
 
   @override
-  void invokeTest({required int number}) {
-    cases[number](_collector);
+  Future<void> invokeTest({required int number}) async {
+    // The generated wrapper creates a task and drains its pending print
+    // writes before reporting the async export's result to the host.
+    final run = cases[number];
+    run(_collector);
   }
 }

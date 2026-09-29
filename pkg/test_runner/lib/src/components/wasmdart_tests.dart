@@ -9,5 +9,8 @@ abstract interface class ResultCollector {
 
 abstract interface class TestedModule {
   int countTests();
-  void invokeTest({required int number});
+
+  /// Runs one test case and waits for pending Dart print writes before
+  /// reporting completion to the host.
+  Future<void> invokeTest({required int number});
 }

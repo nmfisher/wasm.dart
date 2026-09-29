@@ -7,6 +7,10 @@ The goal is to get `wasmtime run dart_compiled_app.wasm` to work without further
 
 > [!NOTE]
 > These tools are still in development and not ready for production. Please file issues for problems you run into!
+>
+> Running components in Wasmtime requires a Dart SDK that emits standard Wasm
+> exception instructions (`try_table`). Local component tests use Dart revision
+> `849024026d6585d750d40a88fcc42d9615047cd6`.
 
 ## Approach
 
@@ -119,9 +123,17 @@ __Legend__:
 | mathLog                                  | ✅          | 🎯        | Using `libm` in Rust.         |
 | randomInt                                | ✅          | 📦        |                               |
 | randomIntSecure                          | ✅          | 📦        |                               |
-| print                                    |             | 📦        | Currently a stub              |
+| print                                    | ✅          | 📦        | Via `wasi:cli/stdout`; requires an async component host |
 | jsonEncodeString                         | ✅          | 🎯        |                               |
 | debugger                                 |             | 🛑        |                               |
 | inspect                                  |             | 🛑        |                               |
 | dartTimelineStreamEnabled                |             | 🛑        |                               |
 | reportTaskEvent                          |             | 🛑        |                               |
+
+## Print completion regression test
+
+With the Rust helper built and a compatible Dart SDK, install Wasmtime 47.0.4
+and run `dart test test/cli_print_test.dart` from `pkg/wasm_components`.
+Set `WASMTIME` to the executable path if it is not on `PATH`.
+This test runs a command through the standard Wasmtime CLI and checks that all
+print output arrives in order before exit, without an explicit application flush.

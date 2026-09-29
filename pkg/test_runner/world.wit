@@ -10,7 +10,9 @@ interface result-collector {
 interface tested-module {
   count-tests: func() -> u32;
 
-  invoke-test: func(number: u32);
+  /// Runs one test case and waits for pending Dart print writes before
+  /// reporting completion to the host.
+  invoke-test: async func(number: u32);
 }
 
 world root {

@@ -1017,6 +1017,8 @@ if ({is_err}.toBool()) {{
                     }
                 };
 
+                let components = self.dart.import(KnownDartUri::PkgWasmComponents);
+                uwriteln!(self.definition, "await {components}.drainPendingPrints();");
                 uwrite!(self.definition, "{name}(");
                 for arg in args {
                     uwrite!(self.definition, "{arg},");
