@@ -38,10 +38,6 @@ jobs:
   analyze:
     if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
     timeout-minutes: 5
-    strategy:
-      matrix:
-        # The standalone component tests need standard Wasm exceptions.
-        dart: [main]
 
     name: Analyze
     runs-on: ubuntu-latest
@@ -49,16 +45,13 @@ jobs:
     - uses: actions/checkout@v6
       with:
         persist-credentials: false
-    - uses: dart-lang/setup-dart@v1
-      with:
-        sdk: ${{ matrix.dart }}
-        flavor: raw
+    - uses: ./.github/actions/setup-dart
     - uses: actions/cache@v5
       with:
         path: "${{ env.PUB_CACHE }}"
-        key: dart-dependencies-${{ matrix.dart }}-${{ runner.os }}
+        key: dart-dependencies-${{ env.DART_REVISION }}-${{ runner.os }}
         restore-keys: |
-          dart-dependencies-${{ matrix.dart }}-
+          dart-dependencies-${{ env.DART_REVISION }}-
           dart-dependencies-
 
     - name: Pub get
@@ -81,24 +74,18 @@ jobs:
     if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
     timeout-minutes: 30
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        dart: [main]
     needs: [compile_rust]
     steps:
     - uses: actions/checkout@v6
       with:
         persist-credentials: false
-    - uses: dart-lang/setup-dart@v1
-      with:
-        sdk: ${{ matrix.dart }}
-        flavor: raw
+    - uses: ./.github/actions/setup-dart
     - uses: actions/cache@v5
       with:
         path: "${{ env.PUB_CACHE }}"
-        key: dart-dependencies-${{ matrix.dart }}-${{ runner.os }}
+        key: dart-dependencies-${{ env.DART_REVISION }}-${{ runner.os }}
         restore-keys: |
-          dart-dependencies-${{ matrix.dart }}-
+          dart-dependencies-${{ env.DART_REVISION }}-
           dart-dependencies-
     - name: Download libraries
       uses: actions/download-artifact@v8
