@@ -6551,6 +6551,7 @@ i2.WasmI32 _component_0(i2.WasmI32 p0) {
           tmp103 = tmp95;
           tmp104 = tmp96;
       }
+      await i0.drainPendingPrints();
       _component_0taskReturn(
         tmp97,
         tmp98,

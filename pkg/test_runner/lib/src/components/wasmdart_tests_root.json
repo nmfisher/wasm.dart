@@ -205,7 +205,7 @@
               }
             ],
             "docs": {
-              "contents": "Runs one test case. Async because a case may perform component-model\nasync work (print lowers to a wasi:cli/stdout stream write): the caller\nkeeps polling `callback` until the returned task has no waitables left."
+              "contents": "Runs one test case and waits for pending Dart print writes before\nreporting completion to the host."
             }
           }
         },

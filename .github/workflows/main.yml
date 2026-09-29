@@ -109,10 +109,10 @@ jobs:
       run: |
         ls assets
         ls lib/src/wit_gen/precompiled/
-    - name: Install wasm-tools
+    - name: Install wasm-tools and Wasmtime
       uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
       with:
-        tool: wasm-tools
+        tool: wasm-tools,wasmtime@47.0.4
 
     - name: Pub get
       run: dart pub get

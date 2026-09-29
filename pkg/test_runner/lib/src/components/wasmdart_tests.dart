@@ -10,8 +10,7 @@ abstract interface class ResultCollector {
 abstract interface class TestedModule {
   int countTests();
 
-  /// Runs one test case. Async because a case may perform component-model
-  /// async work (print lowers to a wasi:cli/stdout stream write): the caller
-  /// keeps polling `callback` until the returned task has no waitables left.
+  /// Runs one test case and waits for pending Dart print writes before
+  /// reporting completion to the host.
   Future<void> invokeTest({required int number});
 }

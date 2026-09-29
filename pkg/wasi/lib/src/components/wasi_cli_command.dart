@@ -8970,6 +8970,7 @@ i2.WasmI32 _component_0() {
         case i0.ErrorResult(:final value):
           tmp1 = const i2.WasmI32(1);
       }
+      await i0.drainPendingPrints();
       _component_0taskReturn(tmp1);
     },
     debugName: 'run',

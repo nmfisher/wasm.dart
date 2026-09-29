@@ -129,3 +129,11 @@ __Legend__:
 | inspect                                  |             | 🛑        |                               |
 | dartTimelineStreamEnabled                |             | 🛑        |                               |
 | reportTaskEvent                          |             | 🛑        |                               |
+
+## Print completion regression test
+
+With the Rust helper built and a compatible Dart SDK, install Wasmtime 47.0.4
+and run `dart test test/cli_print_test.dart` from `pkg/wasm_components`.
+Set `WASMTIME` to the executable path if it is not on `PATH`.
+This test runs a command through the standard Wasmtime CLI and checks that all
+print output arrives in order before exit, without an explicit application flush.

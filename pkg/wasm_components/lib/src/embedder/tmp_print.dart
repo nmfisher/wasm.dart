@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import '../runtime/async/future.dart';
 import '../runtime/async/stream.dart';
+import '../runtime/async/task.dart';
 import '../runtime/result.dart';
 import 'libc.dart';
 import 'string.dart';
@@ -59,17 +60,22 @@ void printImpl(WasmStringImplementation string) {
     }
   }
 
-  // Only the first `count` bytes are initialized; the rest of the buffer is
-  // slack for multi-byte encodings.
-  final readable = newReadableStream(
-    _U8StreamVtable(),
-    Stream.value(Uint8List.sublistView(bytes, 0, count)),
-  );
-
-  // Hand the readable end to the host via wasi:cli/stdout and wait for the
-  // write to complete, so that print statements appear before `run` returns.
-  final future = _writeViaStream(readable.toWasmI32());
-  unawaited(readFuture(_WriteResultVtable(), future.toIntUnsigned()));
+  // Queue writes in print-call order. Generated async exports drain this
+  // queue before returning their result, including wasi:cli/run.
+  Task.forCurrentZone().enqueuePrint(() async {
+    final readable = newReadableStream(
+      _U8StreamVtable(),
+      Stream.value(Uint8List.sublistView(bytes, 0, count)),
+    );
+    final future = _writeViaStream(readable.toWasmI32());
+    final result = await readFuture(
+      _WriteResultVtable(),
+      future.toIntUnsigned(),
+    );
+    if (result case ErrorResult(:final value)) {
+      throw StateError('WASI stdout write failed: $value');
+    }
+  });
 }
 
 const _newline = Latin1String.unsafeWrap(WasmArray.literal([10]));

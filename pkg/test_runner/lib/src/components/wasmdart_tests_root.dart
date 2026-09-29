@@ -67,6 +67,7 @@ i2.WasmI32 _component_1(i2.WasmI32 p0) {
   final asyncExitCode = i0.spawnTask(
     run: () async {
       await _unnamedExport1.invokeTest(number: p0.toIntUnsigned());
+      await i0.drainPendingPrints();
       _component_1taskReturn();
     },
     debugName: 'invoke-test',

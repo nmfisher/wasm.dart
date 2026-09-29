@@ -38,10 +38,8 @@ final class _ExportTestModule(final List<TestCase> cases, RootImports imports)
 
   @override
   Future<void> invokeTest({required int number}) async {
-    // The generated export wrapper runs this inside a component-model task
-    // (its `spawnTask`), so async work - `print` lowering to a
-    // `wasi:cli/stdout` stream write - is driven by the host polling the
-    // exported `callback` until the task's waitable set is empty.
+    // The generated wrapper creates a task and drains its pending print
+    // writes before reporting the async export's result to the host.
     final run = cases[number];
     run(_collector);
   }
