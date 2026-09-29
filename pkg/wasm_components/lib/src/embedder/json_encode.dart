@@ -4,13 +4,13 @@ import 'dart:_wasm';
 import 'string.dart';
 
 /// Encodes [source] as a JSON string literal (including the surrounding
-/// quotes), matching dart:convert's `_JsonStringifier.writeStringContent`:
+/// quotes), as required by the SDK's internal JSON encoder for error strings:
 ///
 /// - `"` becomes `\"`, `\` becomes `\\`
 /// - `\b \t \n \f \r` use their short escapes
 /// - other control characters become `\u00xx` with lowercase hex
-/// - everything else (0x7f, lone surrogates, non-ASCII, U+2028/9) is copied
-///   through unchanged
+/// - unpaired surrogates become lowercase \uXXXX escapes
+/// - valid surrogate pairs and other non-ASCII code units are preserved
 WasmStringImplementation jsonEncodeStringImpl(WasmStringImplementation source) {
   final length = source.length;
 
@@ -32,6 +32,8 @@ WasmStringImplementation jsonEncodeStringImpl(WasmStringImplementation source) {
         default:
           extra += 5; // \u00xx
       }
+    } else if (_isUnpairedSurrogateAt(source, i)) {
+      extra += 5;
     }
   }
 
@@ -88,7 +90,10 @@ WasmStringImplementation jsonEncodeStringImpl(WasmStringImplementation source) {
   out.write(0, 0x22);
   var offset = 1;
   for (var i = 0; i < length; i++) {
-    offset = _writeEscaped(out, offset, source.codeUnitAtUnchecked(i));
+    final code = source.codeUnitAtUnchecked(i);
+    offset = _isUnpairedSurrogateAt(source, i)
+        ? _writeUnicodeEscape(out, offset, code)
+        : _writeEscaped(out, offset, code);
   }
   out.write(offset, 0x22);
   return Utf16String.unsafeWrap(out);
@@ -139,8 +144,8 @@ int _writeUnicodeEscape(WasmArray<WasmI16> out, int offset, int code) {
   out
     ..write(offset++, 0x5c)
     ..write(offset++, 0x75)
-    ..write(offset++, 0x30)
-    ..write(offset++, 0x30)
+    ..write(offset++, _hexDigit((code >> 12) & 0xf))
+    ..write(offset++, _hexDigit((code >> 8) & 0xf))
     ..write(offset++, _hexDigit((code >> 4) & 0xf))
     ..write(offset++, _hexDigit(code & 0xf));
   return offset;
@@ -158,3 +163,19 @@ int _writeUnicodeEscapeI8(WasmArray<WasmI8> out, int offset, int code) {
 }
 
 int _hexDigit(int value) => value < 10 ? 0x30 + value : 0x57 + value;
+
+/// Preserve both halves of a valid UTF-16 pair; escape only isolated halves.
+bool _isUnpairedSurrogateAt(WasmStringImplementation source, int index) {
+  final code = source.codeUnitAtUnchecked(index);
+  if (code >= 0xd800 && code <= 0xdbff) {
+    if (index + 1 == source.length) return true;
+    final next = source.codeUnitAtUnchecked(index + 1);
+    return next < 0xdc00 || next > 0xdfff;
+  }
+  if (code >= 0xdc00 && code <= 0xdfff) {
+    if (index == 0) return true;
+    final previous = source.codeUnitAtUnchecked(index - 1);
+    return previous < 0xd800 || previous > 0xdbff;
+  }
+  return false;
+}

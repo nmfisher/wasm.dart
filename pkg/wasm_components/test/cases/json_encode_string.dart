@@ -30,8 +30,8 @@ void _unicode(BaseResultCollector collector) {
 }
 
 void _nonStringInputs(BaseResultCollector collector) {
-  // jsonEncodeString is reached via jsonEncode for other scalars too; the
-  // string output of those goes through number/bool formatting first.
+  // Public dart:convert coverage; the embedder import is tested separately
+  // through Error.safeToString in error_string_encoding.dart.
   collector.recordString(e: jsonEncode(true));
   collector.recordString(e: jsonEncode(null));
   collector.recordString(e: jsonEncode(1.5));
