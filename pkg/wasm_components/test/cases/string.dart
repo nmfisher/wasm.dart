@@ -50,7 +50,7 @@ void _stringCompareAndReplace(BaseResultCollector collector) {
     ..recordInt(e: 'abc'.compareTo('abc'))
     ..recordString(e: 'Hello, world!'.replaceRange(7, 12, 'Dart'))
     ..recordString(e: 'Hello Dart'.replaceRange(0, 5, '👋'))
-    //    ..recordString(e: 'a-b-a-c'.replaceAll('a', 'x'))
-    //    ..recordString(e: 'ab'.replaceAll('', '|'))
+    ..recordString(e: 'a-b-a-c'.replaceAll('a', 'x'))
+    ..recordString(e: 'ab'.replaceAll('', '|'))
     ..recordInt(e: 'Hi'.codeUnits.reduce((a, b) => a + b));
 }
