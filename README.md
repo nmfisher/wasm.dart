@@ -7,6 +7,10 @@ The goal is to get `wasmtime run dart_compiled_app.wasm` to work without further
 
 > [!NOTE]
 > These tools are still in development and not ready for production. Please file issues for problems you run into!
+>
+> Running components in Wasmtime requires a Dart SDK that emits standard Wasm
+> exception instructions (`try_table`). Local component tests use Dart revision
+> `849024026d6585d750d40a88fcc42d9615047cd6`.
 
 ## Approach
 
@@ -119,7 +123,7 @@ __Legend__:
 | mathLog                                  | ✅          | 🎯        | Using `libm` in Rust.         |
 | randomInt                                | ✅          | 📦        |                               |
 | randomIntSecure                          | ✅          | 📦        |                               |
-| print                                    |             | 📦        | Currently a stub              |
+| print                                    | ✅          | 📦        | Via `wasi:cli/stdout`; requires an async component host |
 | jsonEncodeString                         | ✅          | 🎯        |                               |
 | debugger                                 |             | 🛑        |                               |
 | inspect                                  |             | 🛑        |                               |
