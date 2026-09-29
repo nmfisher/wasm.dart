@@ -40,9 +40,10 @@ jobs:
     timeout-minutes: 5
     strategy:
       matrix:
-        dart: [dev]
+        # The standalone component tests need standard Wasm exceptions.
+        dart: [main]
 
-    name: Analyze ${{ matrix.package }}
+    name: Analyze
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6
@@ -78,11 +79,11 @@ jobs:
   test:
     name: Dart tests
     if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
-    timeout-minutes: 10
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        dart: [dev]
+        dart: [main]
     needs: [compile_rust]
     steps:
     - uses: actions/checkout@v6
@@ -116,6 +117,11 @@ jobs:
 
     - name: Pub get
       run: dart pub get
+    - name: Build component test runner
+      run: cargo build --locked -p test_runner
+    - name: Test wasm_components
+      working-directory: pkg/wasm_components
+      run: dart test test/component_test.dart --reporter expanded --timeout 5m
     - name: Compile integration test components
       working-directory: integration_tests
       run: dart run tool/compile.dart
