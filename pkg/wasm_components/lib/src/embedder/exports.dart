@@ -10,6 +10,7 @@ import '../runtime/async/task.dart';
 import 'clock.dart';
 import 'constants.dart';
 import 'number_format.dart';
+import 'json_encode.dart';
 import 'regexp.dart';
 import 'stack_trace.dart';
 import 'string.dart';
@@ -330,8 +331,8 @@ WasmExternRef stackTraceToString(WasmExternRef? _) {
 
 @pragma('wasm:export')
 WasmExternRef jsonEncodeString(WasmExternRef? line) {
-  // TODO: Actually encode as JSON (not sure what exactly this even does).
-  return line!;
+  return jsonEncodeStringImpl(WasmStringImplementation.fromExtern(line))
+      .externalize();
 }
 
 @pragma('wasm:export')

@@ -120,7 +120,7 @@ __Legend__:
 | randomInt                                | ✅          | 📦        |                               |
 | randomIntSecure                          | ✅          | 📦        |                               |
 | print                                    |             | 📦        | Currently a stub              |
-| jsonEncodeString                         |             | 🎯        | Currently a stub              |
+| jsonEncodeString                         | ✅          | 🎯        |                               |
 | debugger                                 |             | 🛑        |                               |
 | inspect                                  |             | 🛑        |                               |
 | dartTimelineStreamEnabled                |             | 🛑        |                               |
