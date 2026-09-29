@@ -7,6 +7,11 @@ The goal is to get `wasmtime run dart_compiled_app.wasm` to work without further
 
 > [!NOTE]
 > These tools are still in development and not ready for production. Please file issues for problems you run into!
+>
+> dart2wasm (as of Dart 3.13) emits the legacy `try` instruction in SDK internals, which Wasmtime's
+> engine does not implement, so compiled components validate but can't run in Wasmtime yet (see
+> the `print` row). Use a newer SDK that emits standard exception instructions
+> (`try_table`) to execute components through the Rust/Wasmtime runner.
 
 ## Approach
 
@@ -43,10 +48,10 @@ __Legend__:
 
 | Method                                   | Implemented | Category | Notes                         |
 |------------------------------------------|-------------|----------|-------------------------------|
-| scheduleOnce                             | ✅          | 📦        |                               |
-| scheduleRepeated                         | ✅          | 📦        |                               |
+| scheduleOnce                             |             | 📦        |                               |
+| scheduleRepeated                         |             | 📦        |                               |
 | queueMicrotask                           | ✅          | 🎯        |                               |
-| clearSchedule                            | ✅          | 📦        |                               |
+| clearSchedule                            |             | 📦        |                               |
 | currentTimeMicros                        | ✅          | 📦        |                               |
 | stringFromCharCodeArray                  | ✅          | 🎯        |                               |
 | stringFromAsciiBytes                     | ✅          | 🎯        |                               |
@@ -117,10 +122,10 @@ __Legend__:
 | mathAtan                                 | ✅          | 🎯        | Using `libm` in Rust.         |
 | mathExp                                  | ✅          | 🎯        | Using `libm` in Rust.         |
 | mathLog                                  | ✅          | 🎯        | Using `libm` in Rust.         |
-| randomInt                                | ✅          | 📦        |                               |
-| randomIntSecure                          | ✅          | 📦        |                               |
-| print                                    |             | 📦        | Currently a stub              |
-| jsonEncodeString                         | ✅          | 🎯        |                               |
+| randomInt                                | ✅          | 📦        | Deterministic in raw module   |
+| randomIntSecure                          | ✅          | 📦        | Throws in raw module          |
+| print                                    | ✅          | 📦        | Via `wasi:cli/stdout`; requires an async component host |
+| jsonEncodeString                         | ✅          | 🎯        | Currently a stub              |
 | debugger                                 |             | 🛑        |                               |
 | inspect                                  |             | 🛑        |                               |
 | dartTimelineStreamEnabled                |             | 🛑        |                               |
