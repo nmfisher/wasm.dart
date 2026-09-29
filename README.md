@@ -8,9 +8,16 @@ The goal is to get `wasmtime run dart_compiled_app.wasm` to work without further
 > [!NOTE]
 > These tools are still in development and not ready for production. Please file issues for problems you run into!
 >
-> Running components in Wasmtime requires a Dart SDK that emits standard Wasm
-> exception instructions (`try_table`). Local component tests use Dart revision
-> `849024026d6585d750d40a88fcc42d9615047cd6`.
+> **Requires a Dart SDK `^3.14.0-251.0.dev`.** Use a compatible main-channel SDK
+> or build the SDK from source when the released SDKs are older.
+> `pub get` fails on SDK versions below this requirement.
+>
+> Older dart2wasm emitted the legacy `try` instruction in SDK internals, which Wasmtime does not
+> implement, so compiled components validated but could not run there. From `3.14.0-251.0.dev`
+> (commit `de942dbb`, *"[dart2wasm] Translate exceptions to try_table instructions"*) dart2wasm
+> emits `try_table`/`throw_ref` instead, and compiled components run under Wasmtime with no
+> special flags. Verified with Wasmtime 47.0.4: `wasmtime run` on
+> `pkg/wasm_tools/example/hello_world_wasi` prints the expected output and exits 0.
 
 ## Approach
 
@@ -47,10 +54,10 @@ __Legend__:
 
 | Method                                   | Implemented | Category | Notes                         |
 |------------------------------------------|-------------|----------|-------------------------------|
-| scheduleOnce                             | ✅          | 📦        |                               |
-| scheduleRepeated                         | ✅          | 📦        |                               |
+| scheduleOnce                             | ✅          | 📦        | Stub; throws in raw module    |
+| scheduleRepeated                         | ✅          | 📦        | Stub; throws in raw module    |
 | queueMicrotask                           | ✅          | 🎯        |                               |
-| clearSchedule                            | ✅          | 📦        |                               |
+| clearSchedule                            | ✅          | 📦        | Stub; throws in raw module    |
 | currentTimeMicros                        | ✅          | 📦        |                               |
 | stringFromCharCodeArray                  | ✅          | 🎯        |                               |
 | stringFromAsciiBytes                     | ✅          | 🎯        |                               |
@@ -121,11 +128,12 @@ __Legend__:
 | mathAtan                                 | ✅          | 🎯        | Using `libm` in Rust.         |
 | mathExp                                  | ✅          | 🎯        | Using `libm` in Rust.         |
 | mathLog                                  | ✅          | 🎯        | Using `libm` in Rust.         |
-| randomInt                                | ✅          | 📦        |                               |
-| randomIntSecure                          | ✅          | 📦        |                               |
-| print                                    | ✅          | 📦        | Via `wasi:cli/stdout`; requires an async component host |
-| jsonEncodeString                         | ✅          | 🎯        |                               |
-| debugger                                 |             | 🛑        |                               |
+| randomInt                                | ✅          | 📦        | Deterministic in raw module   |
+| randomIntSecure                          | ✅          | 📦        | Throws in raw module          |
+| print                                    | ✅          | 📦        | Via `wasi:cli/stdout`; completes under Wasmtime (e.g. `hello_world_wasi`) |
+| jsonEncodeString                         | ✅          | 🎯        | JSON string escaping          |
+
+| debugger                                 | ✅          | 🛑        | No-op; no debugger attached   |
 | inspect                                  | ✅          | 🛑        | No-op; no debugger attached |
 | dartTimelineStreamEnabled                | ✅          | 🛑        | Always false                  |
 | reportTaskEvent                          | ✅          | 🛑        | No-op stub; events dropped    |
