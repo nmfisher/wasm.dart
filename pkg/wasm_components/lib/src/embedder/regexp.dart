@@ -1,417 +1,2370 @@
+/// A regular-expression engine implementing the `dart.regexp*` embedder
+/// imports on top of the custom [WasmStringImplementation] strings.
+///
+/// The standalone wasm target implements `RegExp` with JavaScript semantics
+/// (ECMAScript `RegExp`): the leftmost match wins, and among matches at the
+/// same start the pattern's preference order (alternatives first-to-last,
+/// greedy by default, lazy after `?`) decides which match is reported.
+///
+/// Supported syntax: literals, `.`, escapes (`\d \D \w \W \s \S \b \B \n \r
+/// \t \f \v \0 \cX \xhh \uhhhh \u{...}`, identity escapes, backreferences),
+/// character classes with ranges, negation, class escapes and the empty
+/// classes `[]` and `[^]`, quantifiers (`*`, `+`, `?`, `{n}`, `{n,}`, `{n,m}`,
+/// greedy and lazy), groups (`(...)`, `(?:...)`, `(?<name>...)`), alternation,
+/// lookaheads `(?=...)` / `(?!...)`, anchors `^`/`$`, and the flags `i m s u`.
+///
+/// With the `u` flag the pattern and the input are matched by code point:
+/// `.` and classes consume whole code points, literal surrogate pairs in the
+/// pattern combine into one atom, and a lone surrogate matches only unpaired
+/// surrogates in the input. Case-insensitive matches canonicalize with the
+/// Unicode simple case folding (`u` flag) or the simple uppercase mapping
+/// guarded to keep non-ASCII characters from folding into ASCII (no `u` flag),
+/// following the ECMAScript `Canonicalize` operation.
+library;
+
 // ignore: import_internal_library
 import 'dart:_wasm';
 
-import 'libc.dart';
 import 'string.dart';
-import 'string_buffer.dart';
-import 'utils.dart';
+import 'unicode_tables.dart';
 
-final class WasmRegExp {
-  WasmI32 handle;
-  final WasmStringImplementation pattern;
-  final WasmI32 multiLine;
-  final WasmI32 caseSensitive;
-  final WasmI32 unicode;
-  final WasmI32 dotAll;
+/// A compiled regular expression.
+final class EmbedderRegexp {
+  final String patternSource;
+  final bool isMultiLine;
+  final bool isCaseSensitive;
+  final bool isUnicode;
+  final bool isDotAll;
+  final bool isSticky;
+  final bool isGlobal;
+
+  /// The parsed top-level alternatives. Each alternative is a list of nodes
+  /// that must match in order.
+  // Library-private so the internal node type does not leak into the API.
+  final List<List<_RegexpNode>> _alternatives;
+
+  /// Number of capturing groups including group 0.
   final int groupCount;
-  final List<WasmStringImplementation> namedGroupNames;
-  final List<int> namedGroupCaptureIndices;
 
-  WasmRegExp(
-    this.handle,
-    this.pattern,
-    this.multiLine,
-    this.caseSensitive,
-    this.unicode,
-    this.dotAll,
+  /// Name of group [i], or null. Index 0 (the whole match) is unnamed.
+  final List<String?> groupNames;
+
+  /// Index of the group called [name].
+  final Map<String, int> groupIndicesByName;
+
+  EmbedderRegexp._(
+    this.patternSource,
+    this.isMultiLine,
+    this.isCaseSensitive,
+    this.isUnicode,
+    this.isDotAll,
+    this.isSticky,
+    this.isGlobal,
+    this._alternatives,
     this.groupCount,
-    this.namedGroupNames,
-    this.namedGroupCaptureIndices,
+    this.groupNames,
+    this.groupIndicesByName,
   );
 
-  static WasmRegExp fromExtern(WasmExternRef? ref) {
-    return ref!.internalize().toObject() as WasmRegExp;
-  }
-}
-
-final class WasmRegExpMatch {
-  final WasmStringImplementation input;
-  final List<int> groupStarts;
-  final List<int> groupEnds;
-  final List<WasmStringImplementation> namedGroupNames;
-  final List<int> namedGroupCaptureIndices;
-
-  WasmRegExpMatch(
-    this.input,
-    this.groupStarts,
-    this.groupEnds,
-    this.namedGroupNames,
-    this.namedGroupCaptureIndices,
-  );
-
-  static WasmRegExpMatch fromExtern(WasmExternRef? ref) {
-    return ref!.internalize().toObject() as WasmRegExpMatch;
-  }
-}
-
-WasmI32 _compilePatternInCache(
-  WasmStringImplementation pattern,
-  WasmI32 multiLine,
-  WasmI32 caseSensitive,
-  WasmI32 unicode,
-  WasmI32 dotAll,
-) {
-  final length = pattern.length;
-  final patternPtr = length > 0
-      ? mallocAligned(const WasmI32(2), (length * 2).toWasmI32())
-      : const WasmI32(2);
-  final addr = patternPtr.toIntUnsigned();
-  for (int i = 0; i < length; i++) {
-    memory.storeInt16(
-      addr + i * 2,
-      WasmI32.fromInt(pattern.codeUnitAtUnchecked(i)),
-    );
-  }
-
-  final handle = dartRegexpCompile(
-    patternPtr,
-    length.toWasmI32(),
-    multiLine,
-    caseSensitive,
-    unicode,
-    dotAll,
-  );
-
-  if (length > 0) {
-    dartFree(patternPtr, (length * 2).toWasmI32(), const WasmI32(2));
-  }
-
-  return handle;
-}
-
-WasmExternRef embedderRegexpCreateOrFailWithString(
-  WasmExternRef? stringRef,
-  WasmI32 multiLine,
-  WasmI32 caseSensitive,
-  WasmI32 unicode,
-  WasmI32 dotAll,
-) {
-  final pattern = WasmStringImplementation.fromExtern(stringRef);
-  final handle = _compilePatternInCache(
-    pattern,
-    multiLine,
-    caseSensitive,
-    unicode,
-    dotAll,
-  );
-
-  if (handle.toIntUnsigned() == 0) {
-    final errPtr = dartRegexpGetErrorPtr();
-    final errLen = dartRegexpGetErrorLen().toIntUnsigned();
-
-    final errBytes = WasmArray<WasmI16>(errLen);
-    final errAddr = errPtr.toIntUnsigned();
-    for (int i = 0; i < errLen; i++) {
-      errBytes.write(i, memory.loadUint16(errAddr + i * 2).toIntUnsigned());
-    }
-    final errMsg = Utf16String.fromCharCodes(
-      errBytes,
-      const WasmI32(0),
-      errLen.toWasmI32(),
-    );
-
-    return WasmAnyRef.fromObject(errMsg).externalize();
-  }
-
-  final groupCount = dartRegexpGetGroupCount(handle).toIntUnsigned();
-  final namedCount = dartRegexpGetNamedGroupCount(handle).toIntUnsigned();
-  final List<WasmStringImplementation> namedNames = [];
-  final List<int> namedCaptureIndices = [];
-
-  if (namedCount > 0) {
-    final capIdxPtr = mallocAligned(const WasmI32(4), const WasmI32(4));
-
-    for (int i = 0; i < namedCount; i++) {
-      final nameLen = dartRegexpGetNamedGroupInfo(
-        handle,
-        i.toWasmI32(),
-        capIdxPtr,
-        const WasmI32(0),
-      ).toIntUnsigned();
-
-      final capIdx = memory
-          .loadUint32(capIdxPtr.toIntUnsigned())
-          .toIntUnsigned();
-
-      final namePtr = mallocAligned(
-        const WasmI32(2),
-        (nameLen * 2).toWasmI32(),
+  /// Compiles [source], or returns the error message as a [String]
+  /// (`dart.regexpCreateOrFailWithString` contract).
+  static Object compile(
+    String source,
+    bool multiLine,
+    bool caseSensitive,
+    bool unicode,
+    bool dotAll,
+  ) {
+    try {
+      final parser = _RegexpParser(
+        source: source,
+        unicode: unicode,
+        caseInsensitive: !caseSensitive,
+        dotAll: dotAll,
+        multiLine: multiLine,
       );
-      dartRegexpGetNamedGroupInfo(handle, i.toWasmI32(), capIdxPtr, namePtr);
+      final alts = parser.parseAlternatives();
+      return EmbedderRegexp._(
+        source,
+        multiLine,
+        caseSensitive,
+        unicode,
+        dotAll,
+        parser.isSticky,
+        parser.isGlobal,
+        alts,
+        parser.groupCount,
+        parser.groupNames,
+        parser.groupIndicesByName,
+      );
+    } on FormatException catch (exception) {
+      // The error message crosses the wasm boundary as a string object; it
+      // has to be one of our string implementations, not a plain Dart string.
+      return WasmStringImplementation.fromDartString(exception.message);
+    }
+  }
 
-      final nameBytes = WasmArray<WasmI16>(nameLen);
-      final nameAddr = namePtr.toIntUnsigned();
-      for (int j = 0; j < nameLen; j++) {
-        nameBytes.write(j, memory.loadUint16(nameAddr + j * 2).toIntUnsigned());
+  /// The first match at or after [start], or exactly at [start] when
+  /// [asPrefix] is set (`RegExp.matchAsPrefix`).
+  EmbedderRegexpMatch? match(
+    WasmStringImplementation string,
+    int start,
+    bool asPrefix,
+  ) {
+    final length = string.length;
+    if (start < 0 || start > length) return null;
+    if (isUnicode && start > 0 && start < length) {
+      // Matches never start inside a surrogate pair: either back up to the
+      // pair's first code unit (prefix matches) or start after it.
+      final before = string.codeUnitAtUnchecked(start - 1);
+      final here = string.codeUnitAtUnchecked(start);
+      if (_isLeadSurrogate(before) && _isTrailSurrogate(here)) {
+        if (!asPrefix) {
+          return match(string, start + 1, false);
+        }
+        return match(string, start - 1, true);
       }
-      final name = Utf16String.fromCharCodes(
-        nameBytes,
-        const WasmI32(0),
-        nameLen.toWasmI32(),
+    }
+    final limit = asPrefix ? start : length;
+    for (var position = start; position <= limit; position++) {
+      // Two slots per group (start and end); -1 marks "did not participate",
+      // which distinguishes an empty span at offset 0 from an unset group.
+      final captures = WasmArray<WasmI32>.filled(
+        2 * (groupCount - 1),
+        WasmI32.fromInt(-1),
       );
+      final matcher = _RegexpMatcher(this, string, captures);
+      final end = matcher.search(position, asPrefix);
+      if (end != null) {
+        return EmbedderRegexpMatch(this, string, position, end, captures);
+      }
+      if (asPrefix) return null;
+      if (isUnicode && position < length) {
+        // Step over a surrogate pair as one code point.
+        final code = string.codeUnitAtUnchecked(position);
+        if (_isLeadSurrogate(code) &&
+            _isTrailSurrogate(string.codeUnitAtUnchecked(position + 1))) {
+          position++;
+        }
+      }
+    }
+    return null;
+  }
 
-      namedNames.add(name);
-      namedCaptureIndices.add(capIdx);
+  /// Replaces every match with [replacement] (`dart.stringReplaceAllRegExp`;
+  /// the SDK passes the already-compiled regexp object as the pattern).
+  ///
+  /// The SDK's `String.replaceAll` does not consult `$` group references in
+  /// [replacement] for the embedder path, so the replacement is inserted
+  /// verbatim, like the string-based specialization.
+  WasmStringImplementation replaceAllRegExp(
+    WasmStringImplementation string,
+    WasmStringImplementation replacement,
+  ) {
+    final length = string.length;
 
-      dartFree(namePtr, (nameLen * 2).toWasmI32(), const WasmI32(2));
+    // Pass 1: find the matches and size the result exactly.
+    final spans = <List<int>>[]; // [matchStart, matchEnd, copyFrom] triples.
+    var resultLength = 0;
+    var searchFrom = 0;
+    while (searchFrom <= length) {
+      final found = match(string, searchFrom, false);
+      if (found == null) break;
+      if (found.start > searchFrom) {
+        spans.add([searchFrom, found.start, 1]);
+        resultLength += found.start - searchFrom;
+      }
+      spans.add([0, 0, 0]); // 0/0/0 marks the replacement.
+      resultLength += replacement.length;
+      if (found.end == found.start) {
+        // Zero-width match: copy the code unit the match consumed nothing of
+        // and step over it, so the loop terminates.
+        if (found.end < length) {
+          spans.add([found.end, found.end + 1, 1]);
+          resultLength++;
+        }
+        searchFrom = found.end + 1;
+      } else {
+        searchFrom = found.end;
+      }
+    }
+    if (searchFrom < length) {
+      spans.add([searchFrom, length, 1]);
+      resultLength += length - searchFrom;
     }
 
-    dartFree(capIdxPtr, const WasmI32(4), const WasmI32(4));
-  }
-
-  final wasmRegExp = WasmRegExp(
-    handle,
-    pattern,
-    multiLine,
-    caseSensitive,
-    unicode,
-    dotAll,
-    groupCount,
-    namedNames,
-    namedCaptureIndices,
-  );
-  return WasmAnyRef.fromObject(wasmRegExp).externalize();
-}
-
-WasmI32 embedderRegexpIsRegexp(WasmExternRef? ref) {
-  if (ref.isNull) return const WasmI32(0);
-  final obj = ref!.internalize().toObject();
-  if (obj is WasmRegExp) return const WasmI32(1);
-  return const WasmI32(0);
-}
-
-WasmExternRef embedderRegexpEscape(WasmExternRef? stringRef) {
-  final string = WasmStringImplementation.fromExtern(stringRef);
-  final len = string.length;
-
-  final WasmArray<WasmI16> chars = WasmArray(len * 2);
-  int destIdx = 0;
-  for (int i = 0; i < len; i++) {
-    final char = string.codeUnitAtUnchecked(i);
-    if (char == 92 || // \
-        char == 42 || // *
-        char == 43 || // +
-        char == 63 || // ?
-        char == 94 || // ^
-        char == 36 || // $
-        char == 40 || // (
-        char == 41 || // )
-        char == 91 || // [
-        char == 93 || // ]
-        char == 123 || // {
-        char == 125 || // }
-        char == 124 || // |
-        char ==
-            46 // .
-            ) {
-      chars.write(destIdx++, 92);
+    // Pass 2: write the result in one allocation.
+    final result = WasmArray<WasmI16>(resultLength);
+    var offset = 0;
+    for (final span in spans) {
+      if (span[2] == 0) {
+        for (var i = 0; i < replacement.length; i++) {
+          result.write(offset++, replacement.codeUnitAtUnchecked(i));
+        }
+      } else {
+        for (var i = span[0]; i < span[1]; i++) {
+          result.write(offset++, string.codeUnitAtUnchecked(i));
+        }
+      }
     }
-    chars.write(destIdx++, char);
+    return Utf16String.unsafeWrap(result);
   }
 
-  final result = Utf16String.fromCharCodes(
-    chars,
-    const WasmI32(0),
-    destIdx.toWasmI32(),
+  /// Escapes [text] for verbatim use inside a pattern. JavaScript escapes
+  /// exactly `$ ( ) * + . ? [ \ ] ^ { | }` (`dart.regexpEscape`).
+  static WasmStringImplementation escape(WasmStringImplementation text) {
+    final length = text.length;
+    var escapes = 0;
+    for (var i = 0; i < length; i++) {
+      if (_needsEscape(text.codeUnitAtUnchecked(i))) escapes++;
+    }
+    if (escapes == 0) return text;
+    if (length == 0) return text;
+    if (text is Latin1String) {
+      final out = WasmArray<WasmI8>(length + escapes);
+      var offset = 0;
+      for (var i = 0; i < length; i++) {
+        final code = text.codeUnitAtUnchecked(i);
+        if (_needsEscape(code)) out.write(offset++, 0x5c);
+        out.write(offset++, code);
+      }
+      return Latin1String.unsafeWrap(out);
+    }
+    final out = WasmArray<WasmI16>(length + escapes);
+    var offset = 0;
+    for (var i = 0; i < length; i++) {
+      final code = text.codeUnitAtUnchecked(i);
+      if (_needsEscape(code)) out.write(offset++, 0x5c);
+      out.write(offset++, code);
+    }
+    return Utf16String.unsafeWrap(out);
+  }
+
+  static bool _needsEscape(int code) {
+    switch (code) {
+      case 0x24 || 0x28 || 0x29 || 0x2a || 0x2b || 0x2e || 0x3f:
+      case 0x5b || 0x5c || 0x5d || 0x5e || 0x7b || 0x7c || 0x7d:
+        return true;
+      default:
+        return false;
+    }
+  }
+}
+
+/// A match of an [EmbedderRegexp] against an input string.
+final class EmbedderRegexpMatch {
+  final EmbedderRegexp pattern;
+  final WasmStringImplementation input;
+
+  /// Code-unit offset where the match starts.
+  final int start;
+
+  /// Code-unit offset just past the match.
+  final int end;
+
+  /// Capture spans: slots `2 * i` and `2 * i + 1` hold the start and end of
+  /// group `i + 1`, or -1 when that group did not participate.
+  final WasmArray<WasmI32> captures;
+  EmbedderRegexpMatch(
+    this.pattern,
+    this.input,
+    this.start,
+    this.end,
+    this.captures,
   );
-  return WasmAnyRef.fromObject(result).externalize();
+
+  /// The [index]th group (`dart.regexpMatchGetGroup` contract: the SDK only
+  /// asks for indices between 0 and [groupCount] inclusive).
+  WasmStringImplementation? group(int index) {
+    if (index == 0) {
+      return input.substring(WasmI32.fromInt(start), WasmI32.fromInt(end));
+    }
+    final begin = captures.readSigned(2 * (index - 1));
+    if (begin < 0) return null;
+    final finish = captures.readSigned(2 * (index - 1) + 1);
+    return input.substring(WasmI32.fromInt(begin), WasmI32.fromInt(finish));
+  }
+
+  /// Number of capturing groups excluding group 0 (the whole match): the
+  /// `RegExpMatch.groupCount` contract.
+  int get groupCount => pattern.groupCount - 1;
 }
 
-WasmExternRef? embedderRegexpMatch(
-  WasmExternRef? regexpRef,
-  WasmExternRef? stringRef,
-  WasmI32 start,
-  WasmI32 asPrefix,
-) {
-  if (regexpRef.isNull || stringRef.isNull) return WasmExternRef.nullRef;
+// ---------------------------------------------------------------------------
+// Compiled pattern representation
+// ---------------------------------------------------------------------------
 
-  final regexp = WasmRegExp.fromExtern(regexpRef);
-  final string = WasmStringImplementation.fromExtern(stringRef);
+/// A node in the compiled pattern: [matchAt] tries to match the node at
+/// [position], continuing through [next] on success.
+abstract class _RegexpNode {
+  /// Whether this node can match without consuming input.
+  bool get canMatchEmpty;
 
-  final length = string.length;
-  final stringPtr = length > 0
-      ? mallocAligned(const WasmI32(2), (length * 2).toWasmI32())
-      : const WasmI32(2);
-  final addr = stringPtr.toIntUnsigned();
-  for (int i = 0; i < length; i++) {
-    memory.storeInt16(
-      addr + i * 2,
-      WasmI32.fromInt(string.codeUnitAtUnchecked(i)),
+  /// Tries to match at [position]; on success continues with [next] and
+  /// returns the end of the whole match, otherwise returns null.
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next);
+}
+
+/// The rest of the match, chained so backtracking works by construction.
+abstract class _MatchContinuation {
+  const _MatchContinuation();
+
+  int? run(int position);
+}
+
+/// The continuation parameter type visible in the public [_RegexpNode.matchAt]
+/// signature.
+
+class _Halt extends _MatchContinuation {
+  const _Halt();
+
+  @override
+  int? run(int position) => position;
+}
+
+/// Continues with [nodes[index]], then [next].
+class _Sequence extends _MatchContinuation {
+  final List<_RegexpNode> nodes;
+  final int index;
+  final _RegexpMatcher matcher;
+  final _MatchContinuation next;
+
+  _Sequence(this.nodes, this.index, this.matcher, this.next);
+
+  @override
+  int? run(int position) {
+    if (index >= nodes.length) return next.run(position);
+    // Continue with the rest of this sequence before handing off to [next];
+    // the sequence has to walk its own nodes in order.
+    return nodes[index].matchAt(
+      position,
+      matcher,
+      _Sequence(nodes, index + 1, matcher, next),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Matcher
+// ---------------------------------------------------------------------------
+
+/// The state of one match attempt.
+class _RegexpMatcher {
+  final EmbedderRegexp pattern;
+  final WasmStringImplementation string;
+  final WasmArray<WasmI32> captures;
+  final int inputLength;
+
+  _RegexpMatcher(this.pattern, this.string, this.captures)
+    : inputLength = string.length;
+
+  /// Matches the whole pattern starting exactly at [position] when [asPrefix]
+  /// is set, otherwise finds the leftmost match at or after [position].
+  /// Returns the end of the match or null.
+  int? search(int position, bool asPrefix) {
+    return _tryAlternatives(
+      pattern._alternatives,
+      this,
+      const _Halt(),
+      position,
     );
   }
 
-  final numGroups = regexp.groupCount + 1;
-  final arraySize = numGroups * 2;
-  final outPtr = mallocAligned(const WasmI32(4), (arraySize * 4).toWasmI32());
+  bool codeUnitEqualsAt(int position, int code) {
+    if (position >= inputLength) return false;
+    final actual = string.codeUnitAtUnchecked(position);
+    if (actual == code) return true;
+    if (pattern.isCaseSensitive) return false;
+    return _canonicalizeUnit(actual, pattern.isUnicode) ==
+        _canonicalizeUnit(code, pattern.isUnicode);
+  }
 
-  var matchStatus = dartRegexpMatch(
-    regexp.handle,
-    stringPtr,
-    length.toWasmI32(),
-    start,
-    asPrefix,
-    outPtr,
-  ).toIntSigned();
+  /// Reads the code point at [position] (a whole surrogate pair as one).
+  int codePointAt(int position) {
+    final code = string.codeUnitAtUnchecked(position);
+    if (pattern.isUnicode &&
+        position + 1 < inputLength &&
+        _isLeadSurrogate(code) &&
+        _isTrailSurrogate(string.codeUnitAtUnchecked(position + 1))) {
+      return 0x10000 +
+          ((code - 0xd800) << 10) +
+          (string.codeUnitAtUnchecked(position + 1) - 0xdc00);
+    }
+    return code;
+  }
 
-  if (matchStatus < 0) {
-    regexp.handle = _compilePatternInCache(
-      regexp.pattern,
-      regexp.multiLine,
-      regexp.caseSensitive,
-      regexp.unicode,
-      regexp.dotAll,
+  /// The number of code units the code point at [position] occupies.
+  int codePointSizeAt(int position) {
+    return codePointAt(position) > 0xFFFF ? 2 : 1;
+  }
+
+  /// The code point just before [position], walking back over a pair.
+  int codePointBefore(int position) {
+    final code = string.codeUnitAtUnchecked(position - 1);
+    if (pattern.isUnicode &&
+        position >= 2 &&
+        _isTrailSurrogate(code) &&
+        _isLeadSurrogate(string.codeUnitAtUnchecked(position - 2))) {
+      return 0x10000 +
+          ((string.codeUnitAtUnchecked(position - 2) - 0xd800) << 10) +
+          (code - 0xdc00);
+    }
+    return code;
+  }
+
+  bool isWordCharAt(int position) {
+    if (position < 0 || position >= inputLength) return false;
+    final code = string.codeUnitAtUnchecked(position);
+    return code == 0x5f ||
+        (code >= 0x30 && code <= 0x39) ||
+        (code >= 0x41 && code <= 0x5a) ||
+        (code >= 0x61 && code <= 0x7a);
+  }
+
+  bool isLineTerminatorAt(int position) {
+    if (position < 0 || position >= inputLength) return false;
+    final code = string.codeUnitAtUnchecked(position);
+    return code == 0x0a || code == 0x0d || code == 0x2028 || code == 0x2029;
+  }
+
+  /// Copies every capture slot; [restoreCaptures] puts them back.
+  List<int> snapshotCaptures() {
+    final slots = captures.length;
+    final snapshot = List<int>.filled(slots, -1);
+    for (var i = 0; i < slots; i++) {
+      snapshot[i] = captures.readSigned(i);
+    }
+    return snapshot;
+  }
+
+  /// Writes [snapshot] back into the capture slots.
+  void restoreCaptures(List<int> snapshot) {
+    for (var i = 0; i < snapshot.length; i++) {
+      captures.write(i, snapshot[i]);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Case canonicalization (ECMAScript `Canonicalize`)
+// ---------------------------------------------------------------------------
+
+bool _isLeadSurrogate(int code) => code >= 0xd800 && code <= 0xdbff;
+
+bool _isTrailSurrogate(int code) => code >= 0xdc00 && code <= 0xdfff;
+
+/// Looks up [code] in the sorted `2 * i` slots of [pairs]; -1 when absent.
+int _lookupPair(WasmArray<WasmI32> pairs, int code) {
+  var low = 0;
+  var high = pairs.length ~/ 2 - 1;
+  while (low <= high) {
+    final mid = (low + high) >> 1;
+    final key = pairs.readSigned(2 * mid);
+    if (key < code) {
+      low = mid + 1;
+    } else if (key > code) {
+      high = mid - 1;
+    } else {
+      return pairs.readSigned(2 * mid + 1);
+    }
+  }
+  return -1;
+}
+
+/// Canonicalizes a single UTF-16 code unit for a case-insensitive match.
+///
+/// With the `u` flag this is the simple/common case folding of the code unit;
+/// without it, the simple uppercase mapping, unless it would move a character
+/// at 128 or above into ASCII (those stay unchanged).
+int _canonicalizeUnit(int code, bool unicode) {
+  if (unicode) {
+    if (code < 0x80) {
+      // ASCII folds to lowercase.
+      if (code >= 0x41 && code <= 0x5a) return code + 0x20;
+      return code;
+    }
+    final folded = _lookupPair(caseFoldPairs, code);
+    return folded >= 0 ? folded : code;
+  }
+  if (code < 0x80) {
+    // Without the flag the mapping is uppercase.
+    if (code >= 0x61 && code <= 0x7a) return code - 0x20;
+    return code;
+  }
+  return _canonicalizeUppercase(code);
+}
+
+/// Canonicalizes a code point (surrogate pairs folded as a whole).
+int _canonicalizeCodePoint(int code, bool unicode) {
+  if (code < 0x80) return _canonicalizeUnit(code, unicode);
+  if (!unicode) return _canonicalizeUppercase(code);
+  if (code > 0xFFFF) {
+    final folded = _lookupPair(caseFoldPairs, code);
+    return folded >= 0 ? folded : code;
+  }
+  return _canonicalizeUnit(code, true);
+}
+
+int _canonicalizeUppercase(int code) {
+  final upper = _lookupPair(simpleUppercasePairs, code);
+  if (upper >= 0) {
+    // Non-ASCII characters never fold into ASCII without the `u` flag.
+    if (code >= 0x80 && upper < 0x80) return code;
+    return upper;
+  }
+  return code;
+}
+
+// ---------------------------------------------------------------------------
+// Concrete nodes
+// ---------------------------------------------------------------------------
+
+/// A single literal code unit, case-folded on demand.
+final class _CharNode extends _RegexpNode {
+  final int code;
+  final bool caseInsensitive;
+
+  _CharNode(this.code, this.caseInsensitive);
+
+  @override
+  bool get canMatchEmpty => false;
+
+  @override
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (!matcher.codeUnitEqualsAt(position, code)) return null;
+    return next.run(position + 1);
+  }
+}
+
+/// A code point above the BMP (`\u{...}` escape or a literal astral character
+/// in unicode mode). Stored as one code point and matched against the
+/// subject's surrogate pair; case-insensitive folding applies to the code
+/// point as a whole.
+final class _AstralCharNode extends _RegexpNode {
+  final int code;
+
+  _AstralCharNode(this.code);
+
+  @override
+  bool get canMatchEmpty => false;
+
+  @override
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (position + 1 >= matcher.inputLength) return null;
+    final actual = matcher.codePointAt(position);
+    if (actual == code) return next.run(position + 2);
+    if (matcher.pattern.isCaseSensitive) return null;
+    if (_canonicalizeCodePoint(actual, matcher.pattern.isUnicode) ==
+        _canonicalizeCodePoint(code, matcher.pattern.isUnicode)) {
+      return next.run(position + 2);
+    }
+    return null;
+  }
+}
+
+/// Builds the node for a parsed code point: astral code points in unicode
+/// mode match the subject's surrogate pair as one atom. Without the flag an
+/// astral code point becomes two independent code-unit atoms.
+_RegexpNode _charNodeForCodePoint(
+  int code,
+  bool caseInsensitive,
+  bool unicode,
+) {
+  if (unicode && code > 0xFFFF) return _AstralCharNode(code);
+  return _CharNode(code, caseInsensitive);
+}
+
+/// A lone trail surrogate escape (`\uDC00`) in unicode mode: it matches an
+/// unpaired trail surrogate only, never the second half of a pair.
+final class _LoneTrailSurrogateNode extends _RegexpNode {
+  final int code;
+
+  _LoneTrailSurrogateNode(this.code);
+
+  @override
+  bool get canMatchEmpty => false;
+
+  @override
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (position >= matcher.inputLength) return null;
+    if (matcher.string.codeUnitAtUnchecked(position) != code) return null;
+    if (position > 0 &&
+        _isLeadSurrogate(matcher.string.codeUnitAtUnchecked(position - 1))) {
+      return null; // second half of a pair
+    }
+    return next.run(position + 1);
+  }
+}
+
+/// A lone lead surrogate (`\uD800` written alone) in unicode mode: it matches
+/// an unpaired lead surrogate only, never the first half of a pair.
+final class _LoneLeadSurrogateNode extends _RegexpNode {
+  final int code;
+
+  _LoneLeadSurrogateNode(this.code);
+
+  @override
+  bool get canMatchEmpty => false;
+
+  @override
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (position >= matcher.inputLength) return null;
+    if (matcher.string.codeUnitAtUnchecked(position) != code) return null;
+    if (position + 1 < matcher.inputLength &&
+        _isTrailSurrogate(matcher.string.codeUnitAtUnchecked(position + 1))) {
+      return null; // first half of a pair
+    }
+    return next.run(position + 1);
+  }
+}
+
+/// Builds the node for a literal code unit read in unicode mode: combines
+/// with a following trail surrogate into one code point.
+_RegexpNode _literalNodeInUnicode(int lead, _RegexpParser parser) {
+  if (!_isLeadSurrogate(lead)) return _CharNode(lead, parser.caseInsensitive);
+  final trail = parser._tryParseTrailSurrogate();
+  if (trail == null) return _LoneLeadSurrogateNode(lead);
+  return _AstralCharNode(0x10000 + ((lead - 0xd800) << 10) + (trail - 0xdc00));
+}
+
+/// Any code point (unicode mode) or code unit (otherwise) except line
+/// terminators, unless `s` is set.
+final class _DotNode extends _RegexpNode {
+  final bool dotAll;
+  final bool unicode;
+
+  _DotNode(this.dotAll, this.unicode);
+
+  @override
+  bool get canMatchEmpty => false;
+
+  @override
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (position >= matcher.inputLength) return null;
+    if (!dotAll && matcher.isLineTerminatorAt(position)) return null;
+    if (unicode) return next.run(position + matcher.codePointSizeAt(position));
+    return next.run(position + 1);
+  }
+}
+
+/// `^` or `$`.
+final class _AnchorNode extends _RegexpNode {
+  final bool isDollar;
+  final bool isMultiLine;
+
+  _AnchorNode(this.isDollar, this.isMultiLine);
+
+  @override
+  bool get canMatchEmpty => true;
+
+  @override
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (isDollar) {
+      final ok = isMultiLine
+          ? position == matcher.inputLength ||
+                matcher.isLineTerminatorAt(position)
+          : position == matcher.inputLength;
+      return ok ? next.run(position) : null;
+    }
+    final ok = isMultiLine
+        ? position == 0 || matcher.isLineTerminatorAt(position - 1)
+        : position == 0;
+    return ok ? next.run(position) : null;
+  }
+}
+
+/// `\b` or `\B`.
+final class _WordBoundaryNode extends _RegexpNode {
+  final bool isNegated;
+
+  _WordBoundaryNode(this.isNegated);
+
+  @override
+  bool get canMatchEmpty => true;
+
+  @override
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
+    final before = matcher.isWordCharAt(position - 1);
+    final after = matcher.isWordCharAt(position);
+    final atBoundary = before != after;
+    return atBoundary != isNegated ? next.run(position) : null;
+  }
+}
+
+/// `\d`, `\D`, `\w`, `\W`, `\s` or `\S`, also inside a character class.
+final class _BuiltinClassNode extends _RegexpNode {
+  /// The ASCII code of the escape letter: `d D w W s S`.
+  final int kind;
+
+  _BuiltinClassNode(this.kind);
+
+  @override
+  bool get canMatchEmpty => false;
+
+  @override
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (position >= matcher.inputLength) return null;
+    final code = matcher.string.codeUnitAtUnchecked(position);
+    var inside = _matchesCodeUnit(code);
+    if (!inside && !matcher.pattern.isCaseSensitive) {
+      // A case-insensitive builtin also accepts a folded form: `[\\w]`/i
+      // matches `ſ` (U+017F), which folds to `s`, without the `u` flag it
+      // does not (non-ASCII never folds into ASCII).
+      final unicode = matcher.pattern.isUnicode;
+      final folded = _canonicalizeUnit(code, unicode);
+      if (folded != code) inside = _matchesCodeUnit(folded);
+    }
+    if (kind == 0x44 || kind == 0x57 || kind == 0x53) inside = !inside;
+    if (!inside) return null;
+    if (matcher.pattern.isUnicode) {
+      return next.run(position + matcher.codePointSizeAt(position));
+    }
+    return next.run(position + 1);
+  }
+
+  bool _matchesCodeUnit(int code) {
+    return _ClassNode._matchesBuiltin(kind, code);
+  }
+
+  static bool isWhitespace(int code) {
+    switch (code) {
+      case 0x09 || 0x0a || 0x0b || 0x0c || 0x0d || 0x20:
+      case 0xa0 || 0x1680:
+      case >= 0x2000 && <= 0x200a:
+      case 0x2028 || 0x2029 || 0x202f || 0x205f || 0x3000 || 0xfeff:
+        return true;
+      default:
+        return false;
+    }
+  }
+}
+
+/// A character class `[...]`: ranges of code points (or code units without
+/// the `u` flag), negation, and the builtin class escapes as members.
+final class _ClassNode extends _RegexpNode {
+  /// Inclusive ranges, sorted by start; built by the parser.
+  final List<(int, int)> ranges;
+
+  /// Builtin class escapes (`d D w W s S`) that are members.
+  final List<int> builtins;
+
+  final bool negated;
+
+  /// Whether members are code points (`u` flag) or code units.
+  final bool unicode;
+
+  _ClassNode(this.ranges, this.builtins, this.negated, this.unicode);
+
+  @override
+  bool get canMatchEmpty => false;
+
+  @override
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (position >= matcher.inputLength) return null;
+    final code = unicode
+        ? matcher.codePointAt(position)
+        : matcher.string.codeUnitAtUnchecked(position);
+    // A character is in the member set when the raw form or (for a
+    // case-insensitive pattern) its canonical image is. The parser closed the
+    // range members under their canonical images, so canonicalizing the
+    // input is enough.
+    var inside = _contains(code);
+    if (!inside && !matcher.pattern.isCaseSensitive) {
+      final canonical = _canonicalize(code);
+      if (canonical != code) inside = _contains(canonical);
+    }
+    if (!inside) {
+      inside = _matchesBuiltins(code, !matcher.pattern.isCaseSensitive);
+    }
+    if (inside == negated) return null;
+    return next.run(
+      position + (unicode ? matcher.codePointSizeAt(position) : 1),
     );
-    matchStatus = dartRegexpMatch(
-      regexp.handle,
-      stringPtr,
-      length.toWasmI32(),
-      start,
-      asPrefix,
-      outPtr,
-    ).toIntSigned();
   }
 
-  if (length > 0) {
-    dartFree(stringPtr, (length * 2).toWasmI32(), const WasmI32(2));
+  bool _contains(int code) {
+    for (var i = 0; i < ranges.length; i++) {
+      final range = ranges[i];
+      if (code < range.$1) return false;
+      if (code <= range.$2) return true;
+    }
+    return false;
   }
 
-  if (matchStatus <= 0) {
-    dartFree(outPtr, (arraySize * 4).toWasmI32(), const WasmI32(4));
-    return WasmExternRef.nullRef;
+  /// Whether [code] is in the member set of the builtin escapes. `\D` and
+  /// friends negate their own set: `[\D]` is "not a digit". With
+  /// [foldCase] the canonical image of [code] is consulted as well, inside
+  /// the negation: `[\W]`/iu rejects `ſ` because it folds to `s`, a word
+  /// character.
+  bool _matchesBuiltins(int code, bool foldCase) {
+    for (var i = 0; i < builtins.length; i++) {
+      final kind = builtins[i];
+      var member = _matchesBuiltin(kind, code);
+      if (!member && foldCase) {
+        final canonical = _canonicalize(code);
+        if (canonical != code) member = _matchesBuiltin(kind, canonical);
+      }
+      if (kind == 0x44 || kind == 0x57 || kind == 0x53) member = !member;
+      if (member) return true;
+    }
+    return false;
   }
 
-  final List<int> groupStarts = [];
-  final List<int> groupEnds = [];
-  final outAddr = outPtr.toIntUnsigned();
-  for (int i = 0; i < numGroups; i++) {
-    groupStarts.add(memory.loadInt32(outAddr + i * 8).toIntSigned());
-    groupEnds.add(memory.loadInt32(outAddr + i * 8 + 4).toIntSigned());
+  int _canonicalize(int code) {
+    return unicode
+        ? _canonicalizeCodePoint(code, true)
+        : _canonicalizeUnit(code, false);
   }
 
-  dartFree(outPtr, (arraySize * 4).toWasmI32(), const WasmI32(4));
-
-  final match = WasmRegExpMatch(
-    string,
-    groupStarts,
-    groupEnds,
-    regexp.namedGroupNames,
-    regexp.namedGroupCaptureIndices,
-  );
-  return WasmAnyRef.fromObject(match).externalize();
+  /// Whether [code] is in the positive set of the builtin escape [kind]
+  /// (`\D` and friends are negated at their use site, by [negated]).
+  static bool _matchesBuiltin(int kind, int code) {
+    return switch (kind) {
+      0x64 || 0x44 => code >= 0x30 && code <= 0x39,
+      0x77 || 0x57 =>
+        code == 0x5f ||
+            (code >= 0x30 && code <= 0x39) ||
+            (code >= 0x41 && code <= 0x5a) ||
+            (code >= 0x61 && code <= 0x7a),
+      0x73 || 0x53 => _BuiltinClassNode.isWhitespace(code),
+      _ => false,
+    };
+  }
 }
 
-WasmI32 embedderRegexpMatchGetStart(WasmExternRef? matchRef) {
-  final match = WasmRegExpMatch.fromExtern(matchRef);
-  return WasmI32.fromInt(match.groupStarts[0]);
+/// A group: `(…)`, `(?:…)`, `(?<name>…)`, `(?=…)` or `(?!…)`.
+final class _GroupNode extends _RegexpNode {
+  final List<List<_RegexpNode>> alternatives;
+  final int captureIndex;
+
+  /// 0 non-capturing, 1 capturing, 2 lookahead `(?=`, 3 negative lookahead
+  /// `(?!`, 4 lookbehind `(?<=`, 5 negative lookbehind `(?<!`.
+  final int kind;
+
+  _GroupNode(this.alternatives, this.captureIndex, this.kind);
+
+  @override
+  bool get canMatchEmpty {
+    for (var a = 0; a < alternatives.length; a++) {
+      final nodes = alternatives[a];
+      var possible = true;
+      for (var i = 0; i < nodes.length; i++) {
+        if (!nodes[i].canMatchEmpty) {
+          possible = false;
+          break;
+        }
+      }
+      if (possible) return true;
+    }
+    return false;
+  }
+
+  @override
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
+    switch (kind) {
+      case 2:
+        return _tryLookahead(alternatives, matcher, next, position, true);
+      case 3:
+        return _tryLookahead(alternatives, matcher, next, position, false);
+      case 4:
+        return _tryLookbehind(alternatives, matcher, next, position, true);
+      case 5:
+        return _tryLookbehind(alternatives, matcher, next, position, false);
+      case 1:
+        return _tryCapturing(
+          alternatives,
+          captureIndex,
+          matcher,
+          next,
+          position,
+        );
+      default:
+        return _tryAlternatives(
+          alternatives,
+          matcher,
+          _GroupEnd(next),
+          position,
+        );
+    }
+  }
 }
 
-WasmI32 embedderRegexpMatchGetEnd(WasmExternRef? matchRef) {
-  final match = WasmRegExpMatch.fromExtern(matchRef);
-  return WasmI32.fromInt(match.groupEnds[0]);
-}
-
-WasmI32 embedderRegexpMatchGetGroupCount(WasmExternRef? matchRef) {
-  final match = WasmRegExpMatch.fromExtern(matchRef);
-  return WasmI32.fromInt(match.groupStarts.length - 1);
-}
-
-WasmExternRef? embedderRegexpMatchGetGroup(
-  WasmExternRef? matchRef,
-  WasmI32 index,
+/// Tries each alternative in order; returns the first full continuation
+/// success.
+int? _tryAlternatives(
+  List<List<_RegexpNode>> alternatives,
+  _RegexpMatcher matcher,
+  _MatchContinuation next,
+  int position,
 ) {
-  final match = WasmRegExpMatch.fromExtern(matchRef);
-  final idx = index.toIntSigned();
-  if (idx < 0 || idx >= match.groupStarts.length) return WasmExternRef.nullRef;
-  final start = match.groupStarts[idx];
-  final end = match.groupEnds[idx];
-  if (start == -1 || end == -1) return WasmExternRef.nullRef;
-  final sub = match.input.substring(start.toWasmI32(), end.toWasmI32());
-  return WasmAnyRef.fromObject(sub).externalize();
-}
-
-WasmI32 embedderRegexpMatchGetNamedGroups(WasmExternRef? matchRef) {
-  final match = WasmRegExpMatch.fromExtern(matchRef);
-  return WasmI32.fromInt(match.namedGroupNames.length);
-}
-
-WasmExternRef embedderRegexpMatchGetGroupName(
-  WasmExternRef? matchRef,
-  WasmI32 index,
-) {
-  final match = WasmRegExpMatch.fromExtern(matchRef);
-  final name = match.namedGroupNames[index.toIntUnsigned()];
-  return WasmAnyRef.fromObject(name).externalize();
-}
-
-WasmExternRef? embedderRegexpMatchGetGroupByName(
-  WasmExternRef? matchRef,
-  WasmI32 nameIndex,
-) {
-  final match = WasmRegExpMatch.fromExtern(matchRef);
-  final idx = nameIndex.toIntSigned();
-  if (idx < 0 || idx >= match.namedGroupCaptureIndices.length) {
-    return WasmExternRef.nullRef;
+  for (var a = 0; a < alternatives.length; a++) {
+    // Captures written inside an alternative (including inside a lookahead,
+    // whose sub-match never runs the failing continuation) are undone when
+    // that alternative fails: backtracking must see the state from before it.
+    final saved = matcher.snapshotCaptures();
+    final result = _Sequence(alternatives[a], 0, matcher, next).run(position);
+    if (result != null) return result;
+    matcher.restoreCaptures(saved);
   }
-  final capIdx = match.namedGroupCaptureIndices[idx];
-  final start = match.groupStarts[capIdx];
-  final end = match.groupEnds[capIdx];
-  if (start == -1 || end == -1) return WasmExternRef.nullRef;
-  final sub = match.input.substring(start.toWasmI32(), end.toWasmI32());
-  return WasmAnyRef.fromObject(sub).externalize();
+  return null;
 }
 
-WasmExternRef? embedderStringReplaceAllRegExp(
-  WasmExternRef? stringRef,
-  WasmExternRef? regexpRef,
-  WasmExternRef? replacementRef,
+/// Lookahead: on a (non-)match resumes [next] at the lookahead start.
+int? _tryLookahead(
+  List<List<_RegexpNode>> alternatives,
+  _RegexpMatcher matcher,
+  _MatchContinuation next,
+  int position,
+  bool positive,
 ) {
-  final string = WasmStringImplementation.fromExtern(stringRef);
-  final replacement = WasmStringImplementation.fromExtern(replacementRef);
+  final matched =
+      _tryAlternatives(alternatives, matcher, const _Halt(), position) != null;
+  if (matched == positive) return next.run(position);
+  return null;
+}
 
-  final len = string.length;
-  final buffer = WasmStringBuffer();
-
-  int start = 0;
-  while (start <= len) {
-    final matchRef = embedderRegexpMatch(
-      regexpRef,
-      stringRef,
-      start.toWasmI32(),
-      const WasmI32(0),
-    );
-    if (matchRef.isNull) {
-      if (start == 0) return stringRef;
-      buffer.writeString(string.substring(start.toWasmI32(), len.toWasmI32()));
+/// Lookbehind: the body has to end exactly at [position], so each alternative
+/// is matched right-to-left: the reverse sequence tries one node after
+/// another backwards, and the first node of the alternative is called with an
+/// empty continuation. Every node already takes the fixed end position from
+/// the matcher and matches its own variable-width atom (character, class,
+/// group, backreference) ending there, so `(?<=ab)` and `(?<=a+)` both work.
+/// Captures written inside the body are undone when the lookbehind (or a
+/// later backtracking step) fails, like for lookaheads.
+int? _tryLookbehind(
+  List<List<_RegexpNode>> alternatives,
+  _RegexpMatcher matcher,
+  _MatchContinuation next,
+  int position,
+  bool positive,
+) {
+  final saved = matcher.snapshotCaptures();
+  var matched = false;
+  for (final nodes in alternatives) {
+    // The continuation only runs when the whole alternative matched; since
+    // the alternative ends at the lookbehind's position, it stops there.
+    if (_ReverseSequence(nodes, nodes.length - 1, matcher, const _Halt())
+            .run(position) !=
+        null) {
+      matched = true;
       break;
     }
+    matcher.restoreCaptures(saved);
+  }
+  if (matched != positive) {
+    matcher.restoreCaptures(saved);
+    return null;
+  }
+  final result = next.run(position);
+  if (result == null) matcher.restoreCaptures(saved);
+  return result;
+}
 
-    final match = WasmRegExpMatch.fromExtern(matchRef);
-    final matchStart = match.groupStarts[0];
-    final matchEnd = match.groupEnds[0];
+/// Matches a list of nodes backwards: [index] runs after the nodes to its
+/// right have matched and ended at the matcher's fixed end position. The
+/// first node of the alternative hands the empty continuation, which cuts
+/// the match off at the lookbehind's start edge.
+class _ReverseSequence extends _MatchContinuation {
+  final List<_RegexpNode> nodes;
+  final int index;
+  final _RegexpMatcher matcher;
+  final _MatchContinuation next;
 
-    buffer
-      ..writeString(string.substring(start.toWasmI32(), matchStart.toWasmI32()))
-      ..writeString(replacement);
+  _ReverseSequence(this.nodes, this.index, this.matcher, this.next);
 
-    if (matchEnd == matchStart) {
-      if (matchStart < len) {
-        buffer.writeCharCode(string.codeUnitAtUnchecked(matchStart));
+  @override
+  int? run(int position) {
+    if (index < 0) return next.run(position);
+    return nodes[index].matchAt(
+      position,
+      matcher,
+      _ReverseSequence(nodes, index - 1, matcher, next),
+    );
+  }
+}
+
+/// Capturing group: tries each alternative; when the body matched, the span
+/// is recorded, then [next] runs. If [next] (or a later alternative) fails,
+/// the previous span is restored before the next alternative is tried.
+int? _tryCapturing(
+  List<List<_RegexpNode>> alternatives,
+  int captureIndex,
+  _RegexpMatcher matcher,
+  _MatchContinuation next,
+  int position,
+) {
+  final startSlot = 2 * (captureIndex - 1);
+  final previousStart = matcher.captures.readSigned(startSlot);
+  final previousEnd = matcher.captures.readSigned(startSlot + 1);
+  return _tryCapturingFrom(
+    alternatives,
+    0,
+    startSlot,
+    previousStart,
+    previousEnd,
+    matcher,
+    next,
+    position,
+  );
+}
+
+int? _tryCapturingFrom(
+  List<List<_RegexpNode>> alternatives,
+  int alternativeIndex,
+  int startSlot,
+  int previousStart,
+  int previousEnd,
+  _RegexpMatcher matcher,
+  _MatchContinuation next,
+  int position,
+) {
+  if (alternativeIndex >= alternatives.length) {
+    // All alternatives failed: put back the span the group had before.
+    matcher.captures.write(startSlot, previousStart);
+    matcher.captures.write(startSlot + 1, previousEnd);
+    return null;
+  }
+  final result = _Sequence(
+    alternatives[alternativeIndex],
+    0,
+    matcher,
+    _CaptureEnd(startSlot, matcher, next, position),
+  ).run(position);
+  if (result != null) return result;
+  // Undo the span the failed alternative wrote so later backtracking sees the
+  // state from before this group.
+  matcher.captures.write(startSlot, previousStart);
+  matcher.captures.write(startSlot + 1, previousEnd);
+  return _tryCapturingFrom(
+    alternatives,
+    alternativeIndex + 1,
+    startSlot,
+    previousStart,
+    previousEnd,
+    matcher,
+    next,
+    position,
+  );
+}
+
+/// Writes the capture span, then resumes [next]; restores the previous span
+/// when the rest of the match fails.
+class _CaptureEnd extends _MatchContinuation {
+  final int startSlot;
+  final _RegexpMatcher matcher;
+  final _MatchContinuation next;
+  final int groupStart;
+
+  _CaptureEnd(this.startSlot, this.matcher, this.next, this.groupStart);
+
+  @override
+  int? run(int position) {
+    matcher.captures.write(startSlot, groupStart);
+    matcher.captures.write(startSlot + 1, position);
+    final result = next.run(position);
+    if (result == null) {
+      matcher.captures.write(startSlot, -1);
+      matcher.captures.write(startSlot + 1, -1);
+    }
+    return result;
+  }
+}
+
+class _GroupEnd extends _MatchContinuation {
+  final _MatchContinuation next;
+  _GroupEnd(this.next);
+
+  @override
+  int? run(int position) => next.run(position);
+}
+
+/// `atom{min,max}` (`max < 0`: unbounded), greedy or lazy.
+///
+/// [firstCapture] is the 1-based index of the first capture group inside
+/// [atom] (0 when the atom captures nothing) and [captureCount] is the number
+/// of groups the atom contains. Following the ECMAScript `RepeatMatcher`,
+/// those captures are cleared at the start of every iteration, and an
+/// iteration that consumes no input is rejected once no more iterations are
+/// required — the combination that both bounds the recursion (an empty match
+/// can never spawn another empty match) and gives `(a|(b))+` on `aba` a null
+/// second group instead of a stale one.
+final class _QuantifierNode extends _RegexpNode {
+  final _RegexpNode atom;
+  final int min;
+  final int max;
+  final bool lazy;
+  final int firstCapture;
+  final int captureCount;
+
+  /// Start of the iteration currently being matched by the forward walk.
+  /// Used by the reverse repetition to detect empty iterations (the
+  /// end-anchored body match returns the iteration's end, which the
+  /// continuation compares against this value).
+  int _lastEnd = -1;
+
+  _QuantifierNode(
+    this.atom,
+    this.min,
+    this.max,
+    this.lazy, [
+    this.firstCapture = 0,
+    this.captureCount = 0,
+  ]) : assert(min >= 0),
+       assert(max < 0 || max >= min);
+
+  @override
+  bool get canMatchEmpty => min == 0 || atom.canMatchEmpty;
+
+  @override
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
+    final previousEnd = _lastEnd;
+    _lastEnd = position;
+    final result = _repeat(
+      atom,
+      min,
+      max,
+      lazy,
+      firstCapture,
+      captureCount,
+      matcher,
+      next,
+      position,
+    );
+    _lastEnd = previousEnd;
+    return result;
+  }
+}
+
+/// Runs one iteration of the repetition: clears the atom's captures, matches
+/// the atom, then continues the repetition in [_RepeatContinue]. Restores the
+/// cleared captures when the iteration fails, so backtracking sees the state
+/// from before the iteration.
+int? _repeatIteration(
+  _RegexpNode atom,
+  int min,
+  int max,
+  bool lazy,
+  int firstCapture,
+  int captureCount,
+  _RegexpMatcher matcher,
+  _MatchContinuation next,
+  int position,
+) {
+  final saved = _saveCaptures(matcher, firstCapture, captureCount);
+  final result = _Sequence(
+    [atom],
+    0,
+    matcher,
+    _RepeatContinue(
+      atom,
+      min,
+      max,
+      lazy,
+      firstCapture,
+      captureCount,
+      matcher,
+      next,
+      position,
+    ),
+  ).run(position);
+  if (result == null) {
+    _restoreCaptures(matcher, firstCapture, saved);
+  }
+  return result;
+}
+
+/// Copies the [count] capture slots of the groups [firstCapture] ..
+/// [firstCapture + count - 1] and then marks them unset.
+List<int> _saveCaptures(_RegexpMatcher matcher, int firstCapture, int count) {
+  final slot = 2 * (firstCapture - 1);
+  final saved = List<int>.filled(2 * count, -1);
+  for (var i = 0; i < 2 * count; i++) {
+    saved[i] = matcher.captures.readSigned(slot + i);
+    matcher.captures.write(slot + i, -1);
+  }
+  return saved;
+}
+
+void _restoreCaptures(
+  _RegexpMatcher matcher,
+  int firstCapture,
+  List<int> saved,
+) {
+  final slot = 2 * (firstCapture - 1);
+  for (var i = 0; i < saved.length; i++) {
+    matcher.captures.write(slot + i, saved[i]);
+  }
+}
+
+/// Continues the repetition after one iteration matched. An iteration that
+/// ends where it started is rejected when no further iteration was required
+/// (`RepeatMatcher` step 2a of ECMAScript): without it, `(?:)*` would recurse
+/// forever.
+class _RepeatContinue extends _MatchContinuation {
+  final _RegexpNode atom;
+  final int min;
+  final int max;
+  final bool lazy;
+  final int firstCapture;
+  final int captureCount;
+  final _RegexpMatcher matcher;
+  final _MatchContinuation next;
+  final int iterationStart;
+
+  _RepeatContinue(
+    this.atom,
+    this.min,
+    this.max,
+    this.lazy,
+    this.firstCapture,
+    this.captureCount,
+    this.matcher,
+    this.next,
+    this.iterationStart,
+  );
+
+  @override
+  int? run(int position) {
+    if (min == 0 && position == iterationStart) return null;
+    return _repeat(
+      atom,
+      min == 0 ? 0 : min - 1,
+      max < 0 ? max : max - 1,
+      lazy,
+      firstCapture,
+      captureCount,
+      matcher,
+      next,
+      position,
+    );
+  }
+}
+
+/// An atom matched end-anchored inside a lookbehind: a reverse walk reaches
+/// this node with [end] being the position its match must finish at. The
+/// inner atom is matched *forwards* from the recovered start and accepted
+/// only when it ends exactly at [end].
+class _EndAnchoredNode extends _RegexpNode {
+  final _RegexpNode inner;
+
+  _EndAnchoredNode(this.inner);
+
+  @override
+  bool get canMatchEmpty => inner.canMatchEmpty;
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    // Candidates ascend from the input start (leftmost match wins), and a
+    // greedy body matched forward from the leftmost fit is the longest.
+    for (var start = 0; start <= end; ) {
+      final result = inner.matchAt(start, matcher, _AtEnd(end, start, next));
+      if (result != null) return result;
+      if (start == end) break;
+      final unit =
+          matcher.pattern.isUnicode ? matcher.codePointSizeAt(start) : 1;
+      start += unit;
+    }
+    return null;
+  }
+}
+
+/// Requires the inner match to end exactly at [end], then resumes [next] at
+/// [start] - the end-anchored form of "the node consumed up to here".
+class _AtEnd extends _MatchContinuation {
+  final int end;
+  final int start;
+  final _MatchContinuation next;
+
+  _AtEnd(this.end, this.start, this.next);
+
+  @override
+  int? run(int position) => position == end ? next.run(start) : null;
+}
+
+/// Chooses the reverse form of a node inside a lookbehind. Single-character
+/// atoms get dedicated reverse nodes; groups, backreferences and quantifiers
+/// are matched end-anchored or backwards as described on their classes.
+_RegexpNode _endAnchored(_RegexpNode node) {
+  if (node is _CharNode) return _ReverseCharNode(node);
+  if (node is _AstralCharNode) return _ReverseAstralCharNode(node);
+  if (node is _DotNode) return _ReverseDotNode(node);
+  if (node is _ClassNode) return _ReverseClassNode(node);
+  if (node is _BuiltinClassNode) return _ReverseBuiltinClassNode(node);
+  if (node is _LoneLeadSurrogateNode) return _ReverseLoneLeadSurrogateNode(node);
+  if (node is _LoneTrailSurrogateNode) {
+    return _ReverseLoneTrailSurrogateNode(node);
+  }
+  if (node is _QuantifierNode) return _ReverseQuantifierNode(node);
+  if (node is _AnchorNode || node is _WordBoundaryNode) return node;
+  if (node is _GroupNode) return _ReverseGroupNode(node);
+  if (node is _BackreferenceNode) return _ReverseBackreferenceNode(node);
+  throw UnsupportedError(
+    'Node type ${node.runtimeType} is not supported in a lookbehind',
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Reverse (lookbehind) nodes
+// ---------------------------------------------------------------------------
+
+/// Base for reverse nodes: they match one atom *ending* at [position] and
+/// resume [next] at the start of that atom. `widthBefore` steps back over
+/// the code unit (or code point in unicode mode) immediately before.
+abstract class _ReverseNode extends _RegexpNode {
+  @override
+  bool get canMatchEmpty => false;
+
+  _ReverseNode();
+
+  /// Width of the atom ending at [end]: one code unit outside unicode mode,
+  /// otherwise 2 when a surrogate pair ends there and 1 for a single unit
+  /// (paired or not, the pair check mirrors what [matchAt] then compares).
+  int widthBefore(_RegexpMatcher matcher, int end) {
+    if (end <= 0) return 0;
+    if (!matcher.pattern.isUnicode) return 1;
+    if (end >= 2) {
+      final lead = matcher.string.codeUnitAtUnchecked(end - 2);
+      final trail = matcher.string.codeUnitAtUnchecked(end - 1);
+      if (_isLeadSurrogate(lead) && _isTrailSurrogate(trail)) return 2;
+    }
+    return 1;
+  }
+}
+
+/// Literal code unit matched right-to-left: the unit at `end - 1` must be
+/// the node's character.
+class _ReverseCharNode extends _ReverseNode {
+  final _CharNode inner;
+
+  _ReverseCharNode(this.inner);
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    final start = end - widthBefore(matcher, end);
+    if (start < 0 || start >= end) return null;
+    if (!matcher.codeUnitEqualsAt(start, inner.code)) return null;
+    return next.run(start);
+  }
+}
+
+/// Astral code point matched right-to-left: the pair ending at [end].
+class _ReverseAstralCharNode extends _ReverseNode {
+  final _AstralCharNode inner;
+
+  _ReverseAstralCharNode(this.inner);
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (end < 2 || !matcher.pattern.isUnicode) return null;
+    final start = end - 2;
+    final actual = matcher.codePointAt(start);
+    if (actual == inner.code) return next.run(start);
+    if (matcher.pattern.isCaseSensitive) return null;
+    if (_canonicalizeCodePoint(actual, matcher.pattern.isUnicode) ==
+        _canonicalizeCodePoint(inner.code, matcher.pattern.isUnicode)) {
+      return next.run(start);
+    }
+    return null;
+  }
+}
+
+/// A lone lead surrogate escape matched right-to-left: the unit at `end - 1`
+/// is an unpaired lead surrogate.
+class _ReverseLoneLeadSurrogateNode extends _ReverseNode {
+  final _LoneLeadSurrogateNode inner;
+
+  _ReverseLoneLeadSurrogateNode(this.inner);
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (end < 1) return null;
+    final start = end - 1;
+    if (matcher.string.codeUnitAtUnchecked(start) != inner.code) return null;
+    if (start + 1 < matcher.inputLength &&
+        _isTrailSurrogate(matcher.string.codeUnitAtUnchecked(start + 1))) {
+      return null; // first half of a pair
+    }
+    return next.run(start);
+  }
+}
+
+/// A lone trail surrogate escape matched right-to-left: the unit at `end - 1`
+/// is an unpaired trail surrogate.
+class _ReverseLoneTrailSurrogateNode extends _ReverseNode {
+  final _LoneTrailSurrogateNode inner;
+
+  _ReverseLoneTrailSurrogateNode(this.inner);
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (end < 1) return null;
+    final start = end - 1;
+    if (matcher.string.codeUnitAtUnchecked(start) != inner.code) return null;
+    if (start > 0 &&
+        _isLeadSurrogate(matcher.string.codeUnitAtUnchecked(start - 1))) {
+      return null; // second half of a pair
+    }
+    return next.run(start);
+  }
+}
+
+/// `.` matched right-to-left.
+class _ReverseDotNode extends _ReverseNode {
+  final _DotNode inner;
+
+  _ReverseDotNode(this.inner);
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (end <= 0 || end > matcher.inputLength) return null;
+    final start = end - widthBefore(matcher, end);
+    if (start < 0) return null;
+    if (!inner.dotAll && matcher.isLineTerminatorAt(start)) return null;
+    return next.run(start);
+  }
+}
+
+/// A character class matched right-to-left.
+class _ReverseClassNode extends _ReverseNode {
+  final _ClassNode inner;
+
+  _ReverseClassNode(this.inner);
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (end <= 0 || end > matcher.inputLength) return null;
+    final start = end - widthBefore(matcher, end);
+    if (start < 0) return null;
+    final code = inner.unicode
+        ? matcher.codePointAt(start)
+        : matcher.string.codeUnitAtUnchecked(start);
+    var inside = inner._contains(code);
+    if (!inside && !matcher.pattern.isCaseSensitive) {
+      final canonical = inner._canonicalize(code);
+      if (canonical != code) inside = inner._contains(canonical);
+    }
+    if (!inside) {
+      inside = inner._matchesBuiltins(code, !matcher.pattern.isCaseSensitive);
+    }
+    if (inside == inner.negated) return null;
+    return next.run(start);
+  }
+}
+
+/// A builtin class escape matched right-to-left.
+class _ReverseBuiltinClassNode extends _ReverseNode {
+  final _BuiltinClassNode inner;
+
+  _ReverseBuiltinClassNode(this.inner);
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    if (end <= 0 || end > matcher.inputLength) return null;
+    final start = end - widthBefore(matcher, end);
+    if (start < 0) return null;
+    final code = matcher.string.codeUnitAtUnchecked(start);
+    var inside = inner._matchesCodeUnit(code);
+    if (!inside && !matcher.pattern.isCaseSensitive) {
+      final unicode = matcher.pattern.isUnicode;
+      final folded = _canonicalizeUnit(code, unicode);
+      if (folded != code) inside = inner._matchesCodeUnit(folded);
+    }
+    final kind = inner.kind;
+    if (kind == 0x44 || kind == 0x57 || kind == 0x53) inside = !inside;
+    if (!inside) return null;
+    return next.run(start);
+  }
+}
+
+/// A quantifier matched right-to-left: iterations are peeled off from the
+/// right. Each body iteration is matched end-anchored between its start and
+/// the iteration's end (the position the previous iteration started at or,
+/// for the rightmost iteration, the lookbehind's end edge); the walk then
+/// either continues with another iteration ending at that start or closes
+/// out. Greedy repetitions take an iteration before handing off, lazy ones
+/// hand off first - the same preference order as the forward walk. The
+/// looping lives in [_RepeatBackwards], a continuation, so forward-matching
+/// body atoms stay transparent.
+class _ReverseQuantifierNode extends _RegexpNode {
+  final _QuantifierNode inner;
+
+  _ReverseQuantifierNode(this.inner);
+
+  @override
+  bool get canMatchEmpty => inner.canMatchEmpty;
+
+  @override
+  int? matchAt(int end, _RegexpMatcher matcher, _MatchContinuation next) {
+    return _RepeatBackwards.first(inner, matcher, next).run(end);
+  }
+}
+
+/// The rest of a reverse repetition after the iterations to its right have
+/// been peeled off: when driven at [position] (the end of the remaining
+/// span, i.e. the start of the iteration just taken), it takes one more
+/// iteration - matched end-anchored between some start <= [position] and
+/// [position] - then either continues with one more [_RepeatBackwards] at
+/// that start or closes out through [next] there.
+class _RepeatBackwards extends _MatchContinuation {
+  final _QuantifierNode inner;
+  final _RegexpMatcher matcher;
+  final _MatchContinuation next;
+
+  /// Iterations still owed (the remaining `min`).
+  int remainingMin;
+
+  /// Iterations taken so far (for the remaining `max`).
+  final int taken;
+
+  _RepeatBackwards(this.inner, this.matcher, this.next, this.remainingMin, this.taken);
+
+  /// Enters the repetition right-to-left at [end]: the first (rightmost)
+  /// iteration ends at [end].
+  factory _RepeatBackwards.first(
+    _QuantifierNode inner,
+    _RegexpMatcher matcher,
+    _MatchContinuation next,
+  ) => _RepeatBackwards(inner, matcher, next, inner.min, 0);
+
+  @override
+  int? run(int position) {
+    if (inner.max >= 0 && taken >= inner.max) {
+      return remainingMin > 0 ? null : next.run(position);
+    }
+    if (remainingMin == 0 && inner.lazy) {
+      // Lazy: handing off is preferred over taking another iteration (the
+      // same order as the forward walk's lazy zero-min branch).
+      final done = next.run(position);
+      if (done != null) return done;
+    }
+    final saved = _saveCaptures(matcher, inner.firstCapture, inner.captureCount);
+    // The body iteration has to end exactly at [position]: match it
+    // forwards from every candidate start (leftmost first, so a greedy
+    // body is taken leftmost-longest, like the VM) and accept only the
+    // candidate that lands on [position], resuming the repetition at that
+    // candidate.
+    for (var start = 0; start <= position; ) {
+      final bodyResult = inner.atom.matchAt(
+        start,
+        matcher,
+        _AtEnd(position, start, _RepeatBackwardsStep(inner, matcher, this)),
+      );
+      if (bodyResult != null) return bodyResult;
+      if (start == position) break;
+      final unit =
+          matcher.pattern.isUnicode ? matcher.codePointSizeAt(start) : 1;
+      start += unit;
+    }
+    _restoreCaptures(matcher, inner.firstCapture, saved);
+    // No iteration fits to the left: greedy stops here and hands off (if
+    // the minimum is met), lazy already tried the hand-off above.
+    if (remainingMin > 0) return null;
+    return next.run(position);
+  }
+}
+
+/// Continues a reverse repetition after one body iteration matched: the
+/// iteration's start is where the next one has to end (or where the walk
+/// hands off to [next]).
+class _RepeatBackwardsStep extends _MatchContinuation {
+  final _QuantifierNode inner;
+  final _RegexpMatcher matcher;
+  final _RepeatBackwards repetition;
+
+  _RepeatBackwardsStep(this.inner, this.matcher, this.repetition);
+
+  @override
+  int? run(int position) {
+    final repetition = this.repetition;
+    final remainingMin = repetition.remainingMin;
+    if (remainingMin == 0 && position == inner._lastEnd) {
+      // An empty iteration cannot advance a backwards walk; without this
+      // check `(?:x*)*`-style bodies would recurse forever (the same rule
+      // as the forward walk's RepeatMatcher step 2a).
+      return null;
+    }
+    return _RepeatBackwards(
+      inner,
+      matcher,
+      repetition.next,
+      remainingMin > 0 ? remainingMin - 1 : 0,
+      repetition.taken + 1,
+    ).run(position);
+  }
+}
+
+/// A group inside a lookbehind: the group's body is matched backwards as a
+/// whole (its alternatives in declared order, like the forward walk).
+class _ReverseGroupNode extends _EndAnchoredNode {
+  _ReverseGroupNode(super.inner);
+}
+
+/// A backreference matched right-to-left: the captured text must appear
+/// immediately before [end].
+class _ReverseBackreferenceNode extends _EndAnchoredNode {
+  _ReverseBackreferenceNode(super.inner);
+}
+
+/// One step of the `RepeatMatcher`: [min] and [max] count the iterations
+/// still allowed, greedy repetitions try one more iteration before
+/// continuing past the quantifier, lazy ones continue first.
+int? _repeat(
+  _RegexpNode atom,
+  int min,
+  int max,
+  bool lazy,
+  int firstCapture,
+  int captureCount,
+  _RegexpMatcher matcher,
+  _MatchContinuation next,
+  int position,
+) {
+  if (max == 0) return next.run(position);
+  if (min != 0) {
+    return _repeatIteration(
+      atom,
+      min,
+      max,
+      lazy,
+      firstCapture,
+      captureCount,
+      matcher,
+      next,
+      position,
+    );
+  }
+  if (!lazy) {
+    final result = _repeatIteration(
+      atom,
+      min,
+      max,
+      lazy,
+      firstCapture,
+      captureCount,
+      matcher,
+      next,
+      position,
+    );
+    if (result != null) return result;
+    return next.run(position);
+  }
+  final result = next.run(position);
+  if (result != null) return result;
+  return _repeatIteration(
+    atom,
+    min,
+    max,
+    lazy,
+    firstCapture,
+    captureCount,
+    matcher,
+    next,
+    position,
+  );
+}
+
+/// `\1` .. `\99`: matches the same text as the referenced group.
+final class _BackreferenceNode extends _RegexpNode {
+  final int groupIndex;
+
+  _BackreferenceNode(this.groupIndex);
+
+  @override
+  bool get canMatchEmpty => true;
+
+  @override
+  int? matchAt(int position, _RegexpMatcher matcher, _MatchContinuation next) {
+    final begin = matcher.captures.readSigned(2 * (groupIndex - 1));
+    if (begin < 0) return next.run(position); // unset: matches empty
+    final finish = matcher.captures.readSigned(2 * (groupIndex - 1) + 1);
+    final unicode = matcher.pattern.isUnicode;
+    var offset = position;
+    var i = begin;
+    while (i < finish) {
+      if (unicode && _isLeadSurrogate(matcher.string.codeUnitAtUnchecked(i))) {
+        // Compare and consume a whole code point on both sides.
+        if (offset + 1 >= matcher.inputLength) return null;
+        final expected = matcher.codePointAt(i);
+        final actual = matcher.codePointAt(offset);
+        if (matcher.pattern.isCaseSensitive) {
+          if (expected != actual) return null;
+        } else if (_canonicalizeCodePoint(actual, true) !=
+            _canonicalizeCodePoint(expected, true)) {
+          return null;
+        }
+        offset += 2;
+        i += 2;
+        continue;
       }
-      start = matchStart + 1;
-    } else {
-      start = matchEnd;
+      if (!matcher.codeUnitEqualsAt(
+        offset,
+        matcher.string.codeUnitAtUnchecked(i),
+      )) {
+        return null;
+      }
+      offset++;
+      i++;
+    }
+    return next.run(offset);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Parser
+// ---------------------------------------------------------------------------
+
+/// A builtin class escape (`\d` and friends) parsed as a class member; it
+/// cannot be a range endpoint.
+final class _ClassEscape {
+  final int code;
+  const _ClassEscape(this.code);
+}
+
+class _RegexpParser {
+  final String source;
+  final bool unicode;
+  final bool caseInsensitive;
+  final bool dotAll;
+  final bool multiLine;
+
+  int position = 0;
+
+  /// Number of capturing groups found so far, plus 1 for group 0 (the whole
+  /// match). The Dart-visible `RegExpMatch.groupCount` excludes group 0, so
+  /// the SDK export reports [groupCount] - 1.
+  /// Group indices each parsed node's captures received, so quantifiers can
+  /// find the groups inside their atom. Only group nodes get entries.
+  final Map<_RegexpNode, (int, int)> _capturedRanges = {};
+
+  /// Number of capturing groups including group 0.
+  int groupCount = 1;
+  final List<String?> groupNames = <String?>[null];
+  final Map<String, int> groupIndicesByName = <String, int>{};
+  bool isSticky = false;
+  bool isGlobal = false;
+
+  _RegexpParser({
+    required this.source,
+    required this.unicode,
+    required this.caseInsensitive,
+    required this.dotAll,
+    required this.multiLine,
+  });
+
+  bool get atEnd => position >= source.length;
+
+  int peek() => position < source.length ? source.codeUnitAt(position) : -1;
+
+  int next() {
+    if (atEnd) fail('Unexpected end of pattern');
+    return source.codeUnitAt(position++);
+  }
+
+  Never fail(String message) => throw FormatException(message);
+
+  /// Parses the top-level alternatives; the source must be fully consumed.
+  List<List<_RegexpNode>> parseAlternatives() {
+    final alternatives = <List<_RegexpNode>>[];
+    for (;;) {
+      final nodes = <_RegexpNode>[];
+      while (peek() != -1 && peek() != 0x29 && peek() != 0x7c) {
+        nodes.add(parseQuantified());
+      }
+      alternatives.add(nodes);
+      if (peek() == 0x7c) {
+        position++; // `|`
+        continue;
+      }
+      if (atEnd) return alternatives;
+      fail('Unmatched )');
     }
   }
 
-  return buffer.renderToString().externalize();
+  /// Parses one atom followed by at most one quantifier (with optional `?`).
+  _RegexpNode parseQuantified() {
+    final atom = parseAtom();
+    final quantifier = _tryParseQuantifier();
+    if (quantifier == null) return atom;
+    final range = _captureRangeOf(atom);
+    final firstCapture = range == null ? 0 : range.$1;
+    final captureCount = range == null ? 0 : range.$2 - range.$1 + 1;
+    var node = _QuantifierNode(
+      atom,
+      quantifier.$1,
+      quantifier.$2,
+      false,
+      firstCapture,
+      captureCount,
+    );
+    if (peek() == 0x3f) {
+      position++;
+      node = _QuantifierNode(
+        atom,
+        quantifier.$1,
+        quantifier.$2,
+        true,
+        firstCapture,
+        captureCount,
+      );
+    }
+    return node;
+  }
+
+  /// The group indices the atom's captures received, null when it has none.
+  ///
+  /// Recording ranges as nodes are parsed keeps the quantifier's capture
+  /// bookkeeping (clearing inner groups per iteration) working without
+  /// requiring node types to expose capture information.
+  (int, int)? _captureRangeOf(_RegexpNode atom) => _capturedRanges[atom];
+
+  (int, int)? _tryParseQuantifier() {
+    switch (peek()) {
+      case 0x2a: // *
+        position++;
+        return (0, -1);
+      case 0x2b: // +
+        position++;
+        return (1, -1);
+      case 0x3f: // ?
+        position++;
+        return (0, 1);
+      case 0x7b: // {n}, {n,}, {n,m} — otherwise a literal brace
+        return _tryParseCounted();
+      default:
+        return null;
+    }
+  }
+
+  (int, int)? _tryParseCounted() {
+    final saved = position;
+    position++; // `{`
+    final min = _parseDecimal();
+    if (min < 0) {
+      position = saved;
+      return null; // not a quantifier: literal `{`
+    }
+    var max = min;
+    if (peek() == 0x2c) {
+      position++;
+      max = -1;
+      if (peek() >= 0x30 && peek() <= 0x39) {
+        max = _parseDecimal();
+      }
+    }
+    if (peek() != 0x7d) {
+      position = saved;
+      return null; // literal `{`
+    }
+    position++;
+    if (max >= 0 && max < min) fail('numbers out of order in {} quantifier');
+    return (min, max);
+  }
+
+  int _parseDecimal() {
+    var value = 0;
+    var digits = 0;
+    while (peek() >= 0x30 && peek() <= 0x39) {
+      value = value * 10 + (next() - 0x30);
+      digits++;
+      if (value > 0xFFFFF) value = 0xFFFFF;
+    }
+    return digits == 0 ? -1 : value;
+  }
+
+  /// Parses one atom (no quantifier).
+  _RegexpNode parseAtom() {
+    switch (peek()) {
+      case 0x5e: // ^
+        position++;
+        return _AnchorNode(false, multiLine);
+      case 0x24: // $
+        position++;
+        return _AnchorNode(true, multiLine);
+      case 0x5c: // \
+        position++;
+        return parseEscape(inClass: false);
+      case 0x28: // (
+        position++;
+        return parseGroup();
+      case 0x5b: // [
+        position++;
+        return parseClass();
+      case 0x2e: // .
+        position++;
+        return _DotNode(dotAll, unicode);
+      case 0x2a || 0x2b || 0x3f: // * + ?
+        fail('Nothing to repeat');
+      case 0x7b: // `{` — a quantifier without an atom, or a literal brace
+        final counted = _tryParseCounted();
+        if (counted != null) fail('Nothing to repeat');
+        position++;
+        return _CharNode(0x7b, caseInsensitive);
+      case 0x29:
+        fail('Unmatched )');
+      case -1:
+        fail('Unexpected end of pattern');
+    }
+    final code = next();
+    if (unicode) return _literalNodeInUnicode(code, this);
+    return _charNodeForCodePoint(code, caseInsensitive, unicode);
+  }
+
+  /// Parses a group starting after `(`.
+  _RegexpNode parseGroup() {
+    var kind = 1; // capturing
+    var captureIndex = 0;
+    String? name;
+    if (peek() == 0x3f) {
+      position++;
+      switch (peek()) {
+        case 0x3a: // (?:
+          position++;
+          kind = 0;
+        case 0x3d: // (?=
+          position++;
+          kind = 2;
+        case 0x21: // (?!
+          position++;
+          kind = 3;
+        case 0x3c: // (?<name>…) or the lookbehinds (?<=…) / (?<!…)
+          position++;
+          if (peek() == 0x3d) {
+            // (?<=
+            position++;
+            kind = 4;
+          } else if (peek() == 0x21) {
+            // (?<!
+            position++;
+            kind = 5;
+          } else {
+            name = parseGroupName();
+            kind = 1;
+          }
+        default:
+          fail('Invalid group');
+      }
+    }
+    if (kind == 1) {
+      captureIndex = groupCount++;
+      groupNames.add(name);
+      if (name != null) groupIndicesByName[name] = captureIndex;
+    }
+    final alternatives = parseGroupAlternatives();
+    // Inside a lookbehind the match walk is right-to-left: each element is
+    // anchored at the position it must *end* at. Single-character atoms
+    // can be matched backwards directly; everything else is wrapped so it
+    // matches end-anchored (see [_EndAnchoredNode]).
+    final effective = (kind == 4 || kind == 5)
+        ? [
+            for (final nodes in alternatives)
+              [for (final node in nodes) _endAnchored(node)],
+          ]
+        : alternatives;
+    final node = _GroupNode(effective, captureIndex, kind);
+    if (kind == 1) {
+      // The range covers this group's own index and every nested group parsed
+      // while its body was parsed (they all got higher indices).
+      _capturedRanges[node] = (captureIndex, groupCount - 1);
+    }
+    return node;
+  }
+
+  /// Parses `alternatives)` inside a group.
+  List<List<_RegexpNode>> parseGroupAlternatives() {
+    final alternatives = <List<_RegexpNode>>[];
+    for (;;) {
+      final nodes = <_RegexpNode>[];
+      while (peek() != -1 && peek() != 0x29 && peek() != 0x7c) {
+        nodes.add(parseQuantified());
+      }
+      alternatives.add(nodes);
+      if (peek() == 0x29) {
+        position++;
+        return alternatives;
+      }
+      if (atEnd) fail('Unterminated group');
+      position++; // `|`
+    }
+  }
+
+  String parseGroupName() {
+    // Read the raw name up to `>`; like the VM, accept any characters rather
+    // than validating the JS IdentifierStart/IdentifierPart grammar.
+    final start = position;
+    while (peek() != 0x3e && peek() != -1) {
+      position++;
+    }
+    if (atEnd) fail('Invalid capture group name');
+    final name = source.substring(start, position);
+    position++; // `>`
+    if (name.isEmpty) fail('Invalid capture group name');
+    if (groupIndicesByName.containsKey(name)) {
+      fail('Duplicate capture group name');
+    }
+    return name;
+  }
+
+  /// Parses `\...` with the backslash already consumed.
+  _RegexpNode parseEscape({required bool inClass}) {
+    if (atEnd) fail('\\ at end of pattern');
+    final code = next();
+    switch (code) {
+      case 0x62 when !inClass: // \b: word boundary
+        return _WordBoundaryNode(false);
+      case 0x42 when !inClass: // \B
+        return _WordBoundaryNode(true);
+      case 0x62: // \b inside a class: backspace
+        return _CharNode(0x08, caseInsensitive);
+      case 0x42:
+        return _CharNode(0x42, caseInsensitive);
+      case 0x66:
+        return _CharNode(0x0c, caseInsensitive);
+      case 0x6e:
+        return _CharNode(0x0a, caseInsensitive);
+      case 0x72:
+        return _CharNode(0x0d, caseInsensitive);
+      case 0x74:
+        return _CharNode(0x09, caseInsensitive);
+      case 0x76:
+        return _CharNode(0x0b, caseInsensitive);
+      case 0x64 || 0x44 || 0x77 || 0x57 || 0x73 || 0x53:
+        return _BuiltinClassNode(code);
+      case 0x30:
+        if (peek() >= 0x30 && peek() <= 0x39) {
+          fail('Invalid octal escape');
+        }
+        return _CharNode(0, caseInsensitive);
+      case 0x63: // \cX: the control letter mod 32
+        final control = peek();
+        if (control >= 0x41 && control <= 0x7a) {
+          position++;
+          return _CharNode(control & 0x1f, caseInsensitive);
+        }
+        fail('Invalid \\c escape');
+      case 0x78:
+        return _charNodeForCodePoint(readHex(2), caseInsensitive, unicode);
+      case 0x75:
+        return _parseUnicodeEscapeAtom();
+      default:
+        if (code >= 0x31 && code <= 0x39) {
+          if (inClass) fail('Invalid class escape');
+          final reference = readBackreference(code - 0x30);
+          if (reference >= groupCount) fail('Invalid backreference');
+          return _BackreferenceNode(reference);
+        }
+        return _CharNode(code, caseInsensitive);
+    }
+  }
+
+  /// Parses a `\uXXXX` or `\u{...}` escape as an atom, combining an escaped
+  /// surrogate pair into one code point in unicode mode.
+  _RegexpNode _parseUnicodeEscapeAtom() {
+    final value = _parseUnicodeEscapeValue();
+    if (unicode && _isLeadSurrogate(value)) {
+      // `\uD800\uDC00` (or a literal trail unit) is one code point.
+      final saved = position;
+      final trail = _tryParseTrailSurrogate();
+      if (trail != null) {
+        return _AstralCharNode(
+          0x10000 + ((value - 0xd800) << 10) + (trail - 0xdc00),
+        );
+      }
+      position = saved;
+      // A lone lead surrogate matches only an unpaired one in the input.
+      return _LoneLeadSurrogateNode(value);
+    }
+    if (unicode && _isTrailSurrogate(value)) {
+      return _LoneTrailSurrogateNode(value);
+    }
+    return _charNodeForCodePoint(value, caseInsensitive, unicode);
+  }
+
+  /// Parses the value of a `\uXXXX` or `\u{...}` escape.
+  int _parseUnicodeEscapeValue() {
+    if (peek() == 0x7b) {
+      if (!unicode) fail('Invalid unicode escape');
+      position++;
+      var value = 0;
+      var any = false;
+      while (peek() != 0x7d && !atEnd) {
+        value = value * 16 + hexValue(next());
+        any = true;
+        if (value > 0x10FFFF) fail('Invalid unicode escape');
+      }
+      if (!any || atEnd) fail('Invalid unicode escape');
+      position++; // `}`
+      return value;
+    }
+    return readHex(4);
+  }
+
+  /// Parses a trailing surrogate, either escaped (`\uDC00`) or literal, right
+  /// after a lead surrogate escape; null when the next input is not one.
+  int? _tryParseTrailSurrogate() {
+    if (atEnd) return null;
+    final code = peek();
+    if (code == 0x5c) {
+      if (position + 1 < source.length &&
+          source.codeUnitAt(position + 1) == 0x75) {
+        final saved = position;
+        position += 2;
+        final value = _parseUnicodeEscapeValue();
+        if (_isTrailSurrogate(value)) return value;
+        position = saved;
+      }
+      return null;
+    }
+    if (_isTrailSurrogate(code)) {
+      position++;
+      return code;
+    }
+    return null;
+  }
+
+  int readBackreference(int firstDigit) {
+    var value = firstDigit;
+    while (peek() >= 0x30 && peek() <= 0x39) {
+      final candidate = value * 10 + (peek() - 0x30);
+      if (candidate >= groupCount) break;
+      position++;
+      value = candidate;
+    }
+    return value;
+  }
+
+  _RegexpNode parseUnicodeEscape() {
+    if (peek() == 0x7b) {
+      if (!unicode) fail('Invalid unicode escape');
+      position++;
+      var value = 0;
+      var any = false;
+      while (peek() != 0x7d && !atEnd) {
+        value = value * 16 + hexValue(next());
+        any = true;
+        if (value > 0x10FFFF) fail('Invalid unicode escape');
+      }
+      if (!any || atEnd) fail('Invalid unicode escape');
+      position++; // `}`
+      return _charNodeForCodePoint(value, caseInsensitive, unicode);
+    }
+    return _charNodeForCodePoint(readHex(4), caseInsensitive, unicode);
+  }
+
+  /// Parses a character class; the `[` is already consumed.
+  _RegexpNode parseClass() {
+    var negated = false;
+    if (peek() == 0x5e) {
+      position++;
+      negated = true;
+    }
+    final ranges = <(int, int)>[];
+    final builtins = <int>[];
+    while (peek() != 0x5d) {
+      if (atEnd) fail('Unterminated character class');
+      _parseClassMember(ranges, builtins);
+    }
+    position++; // `]`
+    if (caseInsensitive && ranges.isNotEmpty) {
+      // Close the set under the members' canonical images, so that matching
+      // only has to canonicalize the input: for every range, add the images
+      // of the code points the case tables map (bounded by the table size,
+      // not the range length; identities are already present).
+      final extra = <(int, int)>[];
+      for (final range in ranges) {
+        _addCaseImages(range.$1, range.$2, unicode, extra);
+      }
+      ranges.addAll(extra);
+    }
+    ranges.sort((a, b) => a.$1.compareTo(b.$1));
+    // An empty class `[]` matches nothing; a negated empty class `[^]`
+    // matches any code point (unit). `_ClassNode` handles both through the
+    // (possibly empty) [ranges].
+    return _ClassNode(ranges, builtins, negated, unicode);
+  }
+
+  /// Adds to [extra] the canonical images of every code point in `[lo, hi]`
+  /// that the case tables map (with the [unicode] mode's canonicalization).
+  /// Identity images are already covered by the range itself.
+  static void _addCaseImages(
+    int lo,
+    int hi,
+    bool unicode,
+    List<(int, int)> extra,
+  ) {
+    final pairs = unicode ? caseFoldPairs : simpleUppercasePairs;
+    final entries = pairs.length ~/ 2;
+    // Binary-search the first table entry at or above `lo`.
+    var low = 0;
+    var high = entries - 1;
+    var first = entries;
+    while (low <= high) {
+      final mid = (low + high) >> 1;
+      final key = pairs.readSigned(2 * mid);
+      if (key < lo) {
+        low = mid + 1;
+      } else {
+        first = mid;
+        high = mid - 1;
+      }
+    }
+    for (var i = first; i < entries; i++) {
+      final source = pairs.readSigned(2 * i);
+      if (source > hi) break;
+      final image = pairs.readSigned(2 * i + 1);
+      // The run-time canonicalization applies the same guard as matching.
+      final mapped = unicode
+          ? image
+          : (source >= 0x80 && image < 0x80 ? source : image);
+      if (mapped != source) extra.add((mapped, mapped));
+    }
+  }
+
+  void _parseClassMember(List<(int, int)> ranges, List<int> builtins) {
+    final start = _parseClassAtom();
+    var dashNext =
+        peek() == 0x2d &&
+        position + 1 < source.length &&
+        source.codeUnitAt(position + 1) != 0x5d;
+    if (start is _ClassEscape) {
+      if (unicode && dashNext) fail('Invalid character class');
+      builtins.add(start.code);
+      // Annex B: the `-` after a class escape is a literal, and the members
+      // after it are parsed fresh (`[\d-x-z]` is `\d`, `-`, then `x-z`).
+      _consumeLiteralDash(ranges);
+      return;
+    }
+    var startCode = start as int;
+    if (unicode && _isLeadSurrogate(startCode)) {
+      // A lead surrogate combines with the next code unit (literal or
+      // escaped) into one code point member.
+      final saved = position;
+      final trail = _tryParseTrailSurrogate();
+      if (trail != null) {
+        startCode = 0x10000 + ((startCode - 0xd800) << 10) + (trail - 0xdc00);
+      } else {
+        position = saved;
+      }
+      // The dash of a range follows the combined code point, not the lead
+      // surrogate alone (`[\uD835\uDCB0-\uD835\uDCBF]` is one astral range).
+      dashNext =
+          peek() == 0x2d &&
+          position + 1 < source.length &&
+          source.codeUnitAt(position + 1) != 0x5d;
+    }
+    if (dashNext) {
+      position++; // `-`
+      final end = _parseClassAtom();
+      if (end is _ClassEscape) {
+        // Annex B: `[a-\d]` is `a`, `-`, `\d` rather than a range.
+        if (unicode) fail('Invalid character class');
+        builtins.add(end.code);
+        ranges.add((startCode, startCode));
+        ranges.add((0x2d, 0x2d));
+        return;
+      }
+      var endCode = end as int;
+      if (unicode && _isLeadSurrogate(endCode)) {
+        // The range end combines with its trail surrogate too.
+        final trail = _tryParseTrailSurrogate();
+        if (trail != null) {
+          endCode = 0x10000 + ((endCode - 0xd800) << 10) + (trail - 0xdc00);
+        }
+      }
+      if (endCode < startCode) fail('Range out of order in character class');
+      ranges.add((startCode, endCode));
+    } else {
+      ranges.add((startCode, startCode));
+    }
+  }
+
+  /// Annex B: after a class escape the `-` is a literal member.
+  void _consumeLiteralDash(List<(int, int)> ranges) {
+    if (peek() == 0x2d &&
+        position + 1 < source.length &&
+        source.codeUnitAt(position + 1) != 0x5d) {
+      position++;
+      ranges.add((0x2d, 0x2d));
+    }
+  }
+
+  /// A parsed class atom: a code point, or a builtin class escape (`\d` and
+  /// friends) which cannot form a range.
+  Object _parseClassAtom() {
+    final code = next();
+    if (code != 0x5c) return code;
+    if (atEnd) fail('\\ at end of pattern');
+    final escaped = next();
+    switch (escaped) {
+      case 0x62:
+        return 0x08;
+      case 0x66:
+        return 0x0c;
+      case 0x6e:
+        return 0x0a;
+      case 0x72:
+        return 0x0d;
+      case 0x74:
+        return 0x09;
+      case 0x76:
+        return 0x0b;
+      case 0x30:
+        if (peek() >= 0x30 && peek() <= 0x39) {
+          fail('Invalid octal escape');
+        }
+        return 0;
+      case 0x63:
+        final control = peek();
+        if (control >= 0x41 && control <= 0x7a) {
+          position++;
+          return control & 0x1f;
+        }
+        fail('Invalid \\c escape');
+      case 0x78:
+        return readHex(2);
+      case 0x75:
+        if (peek() == 0x7b) {
+          if (!unicode) fail('Invalid unicode escape');
+          position++;
+          var value = 0;
+          var any = false;
+          while (peek() != 0x7d && !atEnd) {
+            value = value * 16 + hexValue(next());
+            any = true;
+            if (value > 0x10FFFF) fail('Invalid unicode escape');
+          }
+          if (!any || atEnd) fail('Invalid unicode escape');
+          position++;
+          return value;
+        }
+        return readHex(4);
+      case 0x64 || 0x44 || 0x77 || 0x57 || 0x73 || 0x53:
+        return _ClassEscape(escaped);
+      default:
+        return escaped;
+    }
+  }
+
+  int readHex(int digits) {
+    var value = 0;
+    for (var i = 0; i < digits; i++) {
+      if (atEnd) fail('Invalid hexadecimal escape');
+      value = value * 16 + hexValue(next());
+    }
+    return value;
+  }
+
+  int hexValue(int code) {
+    if (code >= 0x30 && code <= 0x39) return code - 0x30;
+    if (code >= 0x41 && code <= 0x46) return code - 0x37;
+    if (code >= 0x61 && code <= 0x66) return code - 0x57;
+    fail('Invalid hexadecimal escape');
+  }
+
+  /// [hexValue] without failing: -1 for a non-hexadecimal code unit.
+  int hexValueOr(int code) {
+    if (code >= 0x30 && code <= 0x39) return code - 0x30;
+    if (code >= 0x41 && code <= 0x46) return code - 0x37;
+    if (code >= 0x61 && code <= 0x66) return code - 0x57;
+    return -1;
+  }
 }
