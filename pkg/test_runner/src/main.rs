@@ -2,9 +2,10 @@ use std::{env, fs};
 
 use serde::Serialize;
 use wasmtime::{
-    Config, Result, Store,
+    Config, Result, Store, StoreContextMut,
     component::{Component, Linker, Val},
     error::Context,
+    WasmBacktrace,
 };
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p3};
 
@@ -77,6 +78,37 @@ async fn async_main() -> Result<()> {
         collector.func_wrap("record-bool", |_store, params: (bool,)| {
             post_event(&TestEvent::RecordedBool { value: params.0 });
             Ok(())
+        })?;
+    }
+    // The `dart:trace` dependency: render the wasm frames on the host's own
+    // stack into the string the capture import returns. `func_wrap`'s
+    // `StoreContextMut` is exactly the "store is on the call stack" state
+    // `WasmBacktrace::force_capture` reads frames from, and wasmtime lowers
+    // the returned `String` into guest linear memory itself using the
+    // canonical memory + realloc options the compiler registered - the host
+    // never touches guest memory directly.
+    {
+        let mut root = linker.root();
+        let mut trace = root.instance("wasm:dart/trace@1.0.0")?;
+        trace.func_wrap("capture-utf16", |store: StoreContextMut<'_, HostState>, _capacity: (u32,)| {
+            let backtrace = WasmBacktrace::force_capture(&store);
+            // The top frames are the capture machinery itself (`capture-utf16`
+            // lowering, `tryCaptureStackTrace`, `stackTraceGetCurrent`); the
+            // frames the trace is about sit below them, so drop the top three
+            // like the Dart VM hides its own capture frame.
+            let frames: Vec<String> = backtrace
+                .frames()
+                .iter()
+                .skip(3)
+                .map(render_frame)
+                .collect();
+            let mut text = String::from("Uncaught\n");
+            for frame in frames {
+                text.push_str("    at ");
+                text.push_str(&frame);
+                text.push('\n');
+            }
+            Ok((text,))
         })?;
     }
     // The `dart:timeline` dependency: every guest timeline event arrives as
@@ -165,6 +197,16 @@ impl WasiView for HostState {
 fn post_event(event: &TestEvent) {
     let formatted = serde_json::to_string(event).unwrap();
     println!("{formatted}")
+}
+
+/// Renders one wasm frame the way Node does (`M.<name>`), so a trace
+/// captured by this host has the same shape as one captured in the browser
+/// or by the case runner's JavaScript host. `func_name` comes from the
+/// module's name section, which dart2wasm emits for every function at `-O0`
+/// (this suite's optimization level), so a frame is never just an index.
+fn render_frame(frame: &wasmtime::FrameInfo) -> String {
+    let name = frame.func_name().unwrap_or("<unnamed>");
+    format!("M.{}", name)
 }
 
 #[derive(Serialize)]

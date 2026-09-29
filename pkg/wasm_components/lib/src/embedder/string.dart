@@ -212,7 +212,8 @@ final class Latin1String extends WasmStringImplementation {
 final class Utf16String extends WasmStringImplementation {
   final WasmArray<WasmI16> codeUnits;
 
-  Utf16String.unsafeWrap(this.codeUnits) : super._();
+  @pragma('wasm:entry-point')
+  const Utf16String.unsafeWrap(this.codeUnits) : super._();
 
   factory Utf16String.fromCharCodes(
     WasmArray<WasmI16> charCodes,
