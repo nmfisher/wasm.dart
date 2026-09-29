@@ -7,6 +7,7 @@ library;
 import 'dart:_wasm';
 
 import '../runtime/async/task.dart';
+import '../runtime/async/timer.dart';
 import 'clock.dart';
 import 'json_encode.dart';
 import 'number_format.dart';
@@ -35,7 +36,7 @@ WasmExternRef scheduleOnce(
   WasmFunction<WasmVoid Function(WasmAnyRef)> callback,
   WasmAnyRef arg,
 ) {
-  _unsupportedAsyncSchedule();
+  return _schedule(delay, callback, arg, isPeriodic: false);
 }
 
 @pragma('wasm:export')
@@ -44,7 +45,40 @@ WasmExternRef scheduleRepeated(
   WasmFunction<WasmVoid Function(WasmAnyRef)> callback,
   WasmAnyRef arg,
 ) {
-  _unsupportedAsyncSchedule();
+  return _schedule(interval, callback, arg, isPeriodic: true);
+}
+
+WasmExternRef _schedule(
+  WasmI64 delay,
+  WasmFunction<WasmVoid Function(WasmAnyRef)> callback,
+  WasmAnyRef arg, {
+  required bool isPeriodic,
+}) {
+  // The SDK's root-zone Timer patch calls these, which means a task is
+  // running (timers are unreachable before `spawnTask`, which is the only
+  // thing that sets up the async machinery). Timers are wait-for subtasks of
+  // the currently running task: the callback runs in the task's zone, so its
+  // continuations stay on the task's event loop and the host can drive the
+  // timer to completion. An optional task wrapping a timer would never be
+  // entered under wasmtime (guest tasks are only entered while their parent
+  // awaits them), so attaching to the current task is the only correct
+  // registration point.
+  final task = Task.forCurrentThreadUnchecked();
+  if (task == null) _unsupportedAsyncSchedule();
+
+  final handle = EmbedderTimer(
+    task,
+    Duration(microseconds: delay.toInt()),
+    // Note: the callback must be a block-bodied closure. An arrow body
+    // (`() => callback.call(arg)`) makes dart2wasm emit `unreachable` after
+    // the call, because the wasm `WasmFunction.call` signature's return is
+    // not a plain void.
+    () {
+      callback.call(arg);
+    },
+    isPeriodic,
+  );
+  return WasmAnyRef.fromObject(handle).externalize();
 }
 
 @pragma('wasm:export')
@@ -70,7 +104,15 @@ WasmVoid queueMicrotask(
 
 @pragma('wasm:export')
 WasmVoid clearSchedule(WasmExternRef? schedule) {
-  _unsupportedAsyncSchedule();
+  // A timer only hands out a handle after firing has been arranged; a null
+  // handle means the timer already fired (see the SDK's Timer patch, which
+  // never calls this for a null handle). Null tests on externrefs must use
+  // `isNull`: `== null` would lower to a cast to anyref, which externref is
+  // not.
+  if (schedule.isNull) return WasmVoid();
+  final handle = schedule!.internalize().toObject() as EmbedderTimer;
+  handle.cancel();
+  return WasmVoid();
 }
 
 @pragma('wasm:export')

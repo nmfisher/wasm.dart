@@ -1,0 +1,7 @@
+{"type":"start","test":0}
+{"type":"bool","value":true}
+{"type":"bool","value":true}
+{"type":"bool","value":true}
+{"type":"int","value":3}
+timers ok
+{"type":"end","test":0}
