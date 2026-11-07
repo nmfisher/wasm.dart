@@ -468,18 +468,6 @@ WasmExternRef? regexpMatchGetGroupByName(
 }
 
 @pragma('wasm:export')
-WasmI32 isWindows() {
-  // This is only used for URI<->file path formatting, which is not relevant for
-  // WASI.
-  return const WasmI32(0);
-}
-
-@pragma('wasm:export')
-WasmExternRef? baseUri() {
-  return stubRootUri.externalize();
-}
-
-@pragma('wasm:export')
 WasmExternRef stringBufferCreate() {
   return WasmStringBuffer().externalize();
 }
