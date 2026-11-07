@@ -40,6 +40,23 @@ final class Task {
   final Map<int, StreamReadState<void>> readStreams = {};
   final Map<int, StreamSinkState<void>> writeStreams = {};
 
+  Future<void>? _pendingPrints;
+
+  /// Serialize stdout writes started by synchronous Dart print calls.
+  void enqueuePrint(Future<void> Function() write) {
+    _pendingPrints = (_pendingPrints ?? Future<void>.value()).then(
+      (_) => write(),
+    );
+  }
+
+  Future<void> drainPrints() async {
+    while (_pendingPrints != null) {
+      final pending = _pendingPrints!;
+      await pending;
+      if (identical(_pendingPrints, pending)) _pendingPrints = null;
+    }
+  }
+
   var _isRunning = false;
   var _microtaskScheduled = false;
 
@@ -188,10 +205,10 @@ final class Task {
 
       // We don't have to await the future, completing it will trigger an
       // event loop iteration which then runs microtasks.
-      readFutureInternal(FutureVtable.voidVtable, read, this).ignore();
+      unawaited(readFutureInternal(FutureVtable.voidVtable, read, this));
 
       // Immediately complete the future to wake up the task.
-      writable.writeValue(null).ignore();
+      unawaited(writable.writeValue(null));
     }
   }
 
@@ -273,3 +290,8 @@ final class _MicrotaskEntry extends LinkedListEntry<_MicrotaskEntry> {
 
   _MicrotaskEntry(this.entry);
 }
+
+/// Called by generated async exports before reporting their result to the
+/// host. A host may stop executing the component as soon as it receives that
+/// result.
+Future<void> drainPendingPrints() => Task.forCurrentZone().drainPrints();

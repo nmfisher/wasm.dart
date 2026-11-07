@@ -6671,6 +6671,7 @@ i2.WasmI32 _component_0(i2.WasmI32 p0) {
             }
           });
       }
+      await i0.drainPendingPrints();
       _component_0taskReturn(
         tmp108,
         tmp109,
