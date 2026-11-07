@@ -6,6 +6,7 @@
 // before any process exists and is the only side that can spawn. An
 // `ask` verdict returns to the engine as an approval request it answers
 // with `respond` - the host cannot call back into a blocked guest.
+
 package tina:process@1.0.0;
 
 interface types {
