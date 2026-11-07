@@ -84,7 +84,6 @@ import 'string.dart';
   defineString(r'$0', '0');
   defineCharCodes('digits', '0123456789abcdefghijklmnopqrstuvwxyz');
   defineString('unknownTimezone', 'UNKNOWN TZ');
-  defineString('stubRootUri', 'cm-root:/');
   defineString('nan', 'NaN');
   defineString('infinity', 'Infinity');
   defineString('negativeInfinity', '-Infinity');
