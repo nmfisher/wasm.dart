@@ -14,6 +14,22 @@ import the interface never reach the implementation. This is the host
 side of the tina engine's HTTP port (`tina_core.HttpClientPort`); the
 Dart-side binding lives in the tina repository (`tina_wasm` package).
 
+## The `tina:process` host import
+
+The runner also serves `tina:process/process@1.0.0` (spec:
+`docs/tina_process.md`, WIT: `wit/deps/tina-process/`, implementation:
+`src/tina_process.rs`): WASI has no process spawn, so the host runs real
+processes for the engine. The engine's spawn request carries an access
+profile (allow/deny/ask per command pattern, mirroring tina_mode's);
+the host evaluates it before any process exists, refuses denies with the
+rule, and returns `ask` outcomes to the engine as an approval request it
+answers with `respond`. Child stdout/stderr stream to the guest through
+the same machinery `tina:http` bodies use; `wait` reaps, `kill`
+terminates. Spawn working directories are guest paths resolved against
+the runner's preopens (an engine under this host has no other working
+directory). Components that do not import the interface never reach the
+implementation.
+
 ## Runner arguments
 
 ```

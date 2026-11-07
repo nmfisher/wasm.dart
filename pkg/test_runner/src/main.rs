@@ -24,6 +24,7 @@ use wasmtime::{
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p3};
 
 mod tina_http;
+mod tina_process;
 
 fn main() -> Result<()> {
     // Wasmtime's concurrent (async component model) internals log under the
@@ -63,8 +64,11 @@ async fn async_main() -> Result<()> {
     // component path: `--preopen=guest_dir=host_dir` exposes a host directory
     // through a WASI preopen, `--env=NAME=VALUE` sets a WASI environment
     // variable. The case suite passes neither, so its runs are unchanged.
+    // The preopen map is also what `tina:process` resolves spawn working
+    // directories against (see `docs/tina_process.md`).
     let mut wasi = WasiCtxBuilder::new();
     wasi.stdout(stdout.clone());
+    let mut preopens: Vec<(String, std::path::PathBuf)> = Vec::new();
     for arg in env::args().skip(2) {
         if let Some(spec) = arg.strip_prefix("--preopen=") {
             let (guest, host) = spec.split_once('=').ok_or_else(|| {
@@ -77,6 +81,7 @@ async fn async_main() -> Result<()> {
                 wasmtime_wasi::FilePerms::all(),
             )
             .map_err(|e| wasmtime::Error::msg(format!("preopening {host} as {guest}: {e}")))?;
+            preopens.push((guest.to_string(), host.into()));
         } else if let Some(spec) = arg.strip_prefix("--env=") {
             let Some((name, value)) = spec.split_once('=') else {
                 wasmtime::bail!("--env expects NAME=VALUE, got {spec}");
@@ -93,6 +98,8 @@ async fn async_main() -> Result<()> {
             wasi: wasi.build(),
             table: ResourceTable::new(),
             http: reqwest::Client::new(),
+            preopens,
+            process: tina_process::ProcessHost::default(),
         },
     );
 
@@ -210,6 +217,10 @@ async fn async_main() -> Result<()> {
     // The tina engine's HTTP port, served host-side with reqwest. Only
     // components that import `tina:http/client@1.0.0` reach it.
     tina_http::add_to_linker(&mut linker)?;
+    // The tina engine's process port: the host runs real processes for
+    // the engine behind the `tina:process` access profile. Only
+    // components that import `tina:process/process@1.0.0` reach it.
+    tina_process::add_to_linker(&mut linker)?;
 
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let count = instance.get_func(&mut store, count_test_idx).unwrap();
@@ -260,16 +271,32 @@ async fn async_main() -> Result<()> {
 
 /// The state the WASI host functions use: the WASI configuration (stdout)
 /// and the resource table its streams live in, plus the shared reqwest
-/// client behind the `tina:http` import.
+/// client behind the `tina:http` import, the preopen map `tina:process`
+/// resolves spawn working directories against, and its live children.
 struct HostState {
     wasi: WasiCtx,
     table: ResourceTable,
     http: reqwest::Client,
+    preopens: Vec<(String, std::path::PathBuf)>,
+    process: tina_process::ProcessHost,
 }
 
 impl HostState {
     fn http_client(&self) -> reqwest::Client {
         self.http.clone()
+    }
+
+    /// A minimal state for `tina_process`'s unit tests: no WASI, an idle
+    /// HTTP client, no preopens.
+    #[cfg(test)]
+    fn for_tests() -> Self {
+        HostState {
+            wasi: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+            http: reqwest::Client::new(),
+            preopens: Vec::new(),
+            process: tina_process::ProcessHost::default(),
+        }
     }
 }
 

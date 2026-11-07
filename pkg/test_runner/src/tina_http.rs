@@ -25,7 +25,7 @@ use wasmtime::AsContextMut as _;
 
 pub mod bindings {
     wasmtime::component::bindgen!({
-        path: "wit",
+        path: "wit/deps/tina-http",
         world: "tina:http/tina-http-host",
         imports: {
             // The host does real network I/O and hands stream/future

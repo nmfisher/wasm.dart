@@ -8,7 +8,10 @@ serde = "1.0.228"
 serde_json = { version = "1.0.150", features = ["raw_value"] }
 wasmtime = "47.0.2"
 wasmtime-wasi = { version = "47.0.2", features = ["p3"] }
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "process", "io-util"] }
+# The `tina:process` host implementation: the access profile's command
+# patterns are the conservative regexes tina_mode's rules use.
+regex = "1"
 env_logger = "0.11.11"
 # The tina:http host implementation. rustls-tls (no native TLS) keeps the
 # host free of an OpenSSL build dependency; `stream` gives response byte
