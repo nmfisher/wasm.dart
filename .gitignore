@@ -5,3 +5,4 @@
 /.vscode
 **/bin/*.wasm
 *.wasm.map
+pkg/wasm_tools/lib/src/wit_gen/precompiled/
