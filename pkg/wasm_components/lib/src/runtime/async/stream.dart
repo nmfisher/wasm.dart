@@ -418,12 +418,22 @@ final class StreamReadState<T extends List<Object?>> {
   }
 
   void _completeClose() {
+    // Idempotent: the dropped event and the task's own teardown can both
+    // route here, and a second pass would free the pending read's buffer
+    // twice (a talc double-deallocate crashes the guest).
+    if (_dropped) return;
     if (_pendingRead case final pending? when pending.totalLength > 0) {
+      _pendingRead = null;
+      // Reads copy elements out eagerly (`readFromBuffer` frees each
+      // element's own allocations, e.g. strings, as it copies), and a
+      // blocked read's unwritten region holds no elements at all - so
+      // the element region to free at close is always empty; only the
+      // buffer itself is freed.
       _vtable.freeBuffer(
         pending.startPointer,
         pending.totalLength,
-        pending.acknowledged,
-        pending.totalLength,
+        0,
+        0,
       );
     }
 

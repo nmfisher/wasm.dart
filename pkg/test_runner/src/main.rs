@@ -68,6 +68,37 @@ async fn async_main() -> Result<()> {
     // directories against (see `docs/tina_process.md`).
     let mut wasi = WasiCtxBuilder::new();
     wasi.stdout(stdout.clone());
+    // The tina engine's `--pipes` protocol reads its driving requests
+    // from stdin (the case suite's components never do). Stdin is wired
+    // unless `--no-stdin` is given, so a case run piped nothing stays
+    // unchanged: EOF arrives immediately for components that read.
+    if !env::args().skip(2).any(|arg| arg == "--no-stdin") {
+        // `tokio::io::stdin` blocks the single-threaded runtime's event
+        // loop (its reads are runtime-thread-bound), which stalls every
+        // guest - even ones that never read stdin. Instead, a plain
+        // thread pumps process stdin into a channel, and the guest reads
+        // the channel: interactive pipes stay live, EOF arrives as EOF.
+        let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(16);
+        std::thread::spawn(move || {
+            use std::io::Read as _;
+            let mut stdin = std::io::stdin().lock();
+            let mut buffer = [0u8; 8192];
+            loop {
+                match stdin.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let chunk = bytes::Bytes::copy_from_slice(&buffer[..n]);
+                        if tx.blocking_send(chunk).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        wasi.stdin(wasmtime_wasi::cli::AsyncStdinStream::new(
+            ChannelReader { receiver: rx },
+        ));
+    }
     let mut preopens: Vec<(String, std::path::PathBuf)> = Vec::new();
     for arg in env::args().skip(2) {
         if let Some(spec) = arg.strip_prefix("--preopen=") {
@@ -82,6 +113,8 @@ async fn async_main() -> Result<()> {
             )
             .map_err(|e| wasmtime::Error::msg(format!("preopening {host} as {guest}: {e}")))?;
             preopens.push((guest.to_string(), host.into()));
+        } else if arg == "--no-stdin" {
+            // Consumed above.
         } else if let Some(spec) = arg.strip_prefix("--env=") {
             let Some((name, value)) = spec.split_once('=') else {
                 wasmtime::bail!("--env expects NAME=VALUE, got {spec}");
@@ -222,7 +255,9 @@ async fn async_main() -> Result<()> {
     // components that import `tina:process/process@1.0.0` reach it.
     tina_process::add_to_linker(&mut linker)?;
 
+    eprintln!("[runner] instantiating");
     let instance = linker.instantiate_async(&mut store, &component).await?;
+    eprintln!("[runner] instantiated");
     let count = instance.get_func(&mut store, count_test_idx).unwrap();
     let invoke = instance.get_func(&mut store, invoke_test_idx).unwrap();
 
@@ -248,6 +283,7 @@ async fn async_main() -> Result<()> {
             };
 
             for i in 0..num_tests {
+                eprintln!("[runner] invoking test {i}");
                 post_event(&TestEvent::TestStart { test: i });
                 invoke
                     .call_concurrent(accessor, &[Val::U32(i)], &mut [])
@@ -384,6 +420,30 @@ impl tokio::io::AsyncWrite for TrackedStdoutStream {
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Poll::Ready(Ok(()))
+    }
+}
+
+/// [tokio::io::AsyncRead] over an mpsc channel a feeder thread owns:
+/// each ready chunk is one read; channel close is EOF.
+struct ChannelReader {
+    receiver: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+}
+
+impl tokio::io::AsyncRead for ChannelReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.receiver.poll_recv(cx) {
+            Poll::Ready(Some(chunk)) => {
+                let n = chunk.len().min(buf.remaining());
+                buf.put_slice(&chunk[..n]);
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(None) => Poll::Ready(Ok(())),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
