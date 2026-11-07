@@ -1,6 +1,8 @@
 #!/bin/sh
 set -e
 
+cd "$(dirname "$0")/.."
+
 RUSTFLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpanic=immediate-abort" \
   cargo +nightly build --release \
     -Zbuild-std=core,alloc,panic_abort \
