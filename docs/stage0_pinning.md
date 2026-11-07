@@ -82,14 +82,16 @@ layout incl. `bin/dart`, `bin/dartaotruntime`,
 platform dills (`dart2wasm_standalone_platform.dill` etc.).
 
 Stage-0 rebuild attempt of the `runtime` + `dart2wasm` targets at the pinned
-ref: **FAILED — exact blocker below** (recorded verbatim, not worked around).
-The `runtime` target's dependency graph pulls the
+ref: **now succeeds** (see "SDK rebuild log" at the end for the full story).
+The initial attempt failed — exact blocker, recorded verbatim below — because
+the `runtime` target's dependency graph pulls the
 `//utils/dart2wasm:ffi_native_test_wasm_module` step, which compiles a C test
 module with emscripten. This checkout was synced with the DEPS default
 `download_emscripten = False`, so the `install_emscripten`/`activate_emscripten`
-gclient hooks never ran and no `emcc` exists in the container.
+gclient hooks never ran and no `emcc` existed in the container.
 
-Raw error (both `runtime` and `dart2wasm` targets, ~1630/1643 steps in):
+Raw error of the initial attempt (both `runtime` and `dart2wasm` targets,
+~1630/1643 steps in):
 
 ```
 FAILED: [code=1] wasm/ffi_native_test_module.wasm
@@ -100,13 +102,20 @@ buildtools/ninja/ninja -C out/ReleaseX64 runtime dart2wasm
 BUILD FAILED
 ```
 
-Scope note: the failure is a **test fixture** (`tests/web/wasm/ffi/…`), not a
-product binary. The product artifacts the wasm.dart pipeline consumes
-(`out/ReleaseX64/dart-sdk/**` incl. `bin/dart`, `bin/dartaotruntime`,
-`bin/snapshots/dart2wasm_product.snapshot`, `lib/libraries.json`) were built
-completely (September 26 `create_sdk` build at this ref) and are what the rest
-of Stage 0 exercises. Everything else in the 1643-step graph compiled cleanly
-before the emcc step stopped it (~1630/1643).
+Resolution (follow-up task, 2026-11-07): two missing system packages —
+`bzip2` and `lbzip2` — were why the checkout's own DEPS emsdk hook
+(`python3 third_party/emsdk/emsdk.py install 3.1.3` at the DEPS-pinned rev
+`e41b8c6`, version 3.1.3 per DEPS `emsdk_ver`) could not unpack its
+`wasm-binaries.tbz2`: this GNU tar shells out to `lbzip2` for `.tbz2`, and
+neither helper existed in the container (`.tar.xz` unpacking used xz and
+worked, which masked it). After `sudo apt-get update && sudo apt-get install
+-y bzip2 lbzip2` (Ubuntu noble, standard system packages), the in-tree
+`emsdk.py install/activate 3.1.3` completed and put `emcc` exactly where the
+build expects it (`third_party/emsdk/upstream/emscripten/emcc`), with no
+changes to the build, DEPS, or source tree. A separate emsdk 7.0.0
+(`./emsdk install latest && ./emsdk activate latest`) was also installed at
+`~/tools/emsdk` per the follow-up brief's step 1, but the build itself uses
+the DEPS-pinned in-tree 3.1.3.
 
 ## wasm.dart toolchain pins
 
@@ -259,6 +268,9 @@ rejects a pipeline-built component with exactly that error.
 
 ## SDK rebuild log
 
+**Status: the `runtime` + `dart2wasm` targets now build cleanly at the pinned
+ref — `ninja: no work to do` on re-run.**
+
 Attempted at the pinned ref in this container, from
 `/home/agent/dart-sdk-src/sdk`:
 
@@ -268,14 +280,59 @@ export DEPOT_TOOLS_UPDATE=0 GCLIENT_SUPPRESS_GIT_VERSION_WARNING=1
 python3 tools/build.py -m release -a x64 --no-rbe runtime dart2wasm
 ```
 
-Outcome: BUILD FAILED after ~1630/1643 steps; the single failing step is
-`//utils/dart2wasm:ffi_native_test_wasm_module` needing
-`third_party/emsdk/upstream/emscripten/emcc`, which does not exist because the
-checkout was synced with `download_emscripten = False` (DEPS default) and the
-emsdk install hooks never ran. Raw error in the section above. Per the brief,
-the build part stops here; escalation (installing emsdk or syncing with
-`download_emscripten=True`) is expected and fine, but was not attempted in
-Stage 0.
+Timeline:
+
+1. **First attempt (Stage 0):** BUILD FAILED after ~1630/1643 steps on the
+   emcc step (raw error above). All C++/Dart compilation in the graph had
+   already succeeded; only the emscripten fixture step and the 14 links it
+   gated were missing.
+2. **Follow-up (this task):** installed emsdk — first `latest` (7.0.0) at
+   `~/tools/emsdk` per the brief's step 1 (`clone`, `install`, `activate`,
+   `source emsdk_env.sh`; emcc 7.0.0 verified), then the DEPS-pinned 3.1.3
+   in-tree via the checkout's own hook commands, which is what the build's
+   hard-coded path consumes. The in-tree install initially failed:
+
+   ```
+   tar (child): lbzip2: Cannot exec: No such file or directory
+   tar (child): Error is not recoverable: exiting now
+   ['tar', '-xf', '.../zips/2ddc66235392b37e5b33477fd86cbe01a14b8aa2-wasm-binaries.tbz2', '--strip', '1'] failed with error code 2!
+   error: installation failed!
+   ```
+
+   Fixed by installing the missing system packages (`sudo apt-get update`,
+   `sudo apt-get install -y bzip2 lbzip2`; no sudo-free alternative existed —
+   apt without sudo failed on the dpkg lock, and both packages had
+   "no installation candidate" until `apt-get update`). No source, DEPS, or
+   build-config change was involved.
+3. **Retry:** the same build command completed in **5.5 s** — everything up to
+   the emcc step was already built by the first attempt; the emcc step
+   produced `out/ReleaseX64/wasm/ffi_native_test_module.wasm` (7016 bytes,
+   verified to also build standalone through `gn_run_binary.py`), and the 14
+   gated link steps finished. A second invocation reported
+   `ninja: no work to do` (1.4 s), confirming the graph is fully satisfied.
+
+Build config at the pinned ref (unchanged by this task; `out/ReleaseX64/
+args.gn`): `is_release = true`, `is_debug = false`, `is_product = false`,
+`dart_use_compressed_pointers = false`, `dart_use_crashpad = false`,
+`use_rbe = false`, `target_os = "linux"`, `host_cpu = "x64"`,
+`target_cpu = "x64"`, sysroot `debian`. SDK git state: `HEAD detached at
+e7112ac2` (the pinned commit), clean tree.
+
+Smoke test of the rebuilt toolchain (2026-11-07): the built SDK's
+`bin/dart` (version string
+`3.14.0-edge.e7112ac2438cd4f5ac0c832c27ce75bb10b02420 (main)`) compiled a
+hello-world with `dart compile wasm --standalone` (`hello.dart2.wasm`,
+16786 bytes), `wasm_tools compile` self-linked the print case into a
+component (`print.wasm`, 487481 bytes), and the wasmtime 47.0.2 reference
+host ran it:
+
+```
+{"type":"start","test":0}
+{"type":"bool","value":true}
+hello from wasm
+second line
+{"type":"end","test":0}                                        (rc=0)
+```
 
 The prior, successful build of the SDK products at this ref used:
 
