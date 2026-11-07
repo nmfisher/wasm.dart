@@ -69,6 +69,13 @@ final class ComponentCompiler {
         '--no-minify',
         '--no-strip-wasm',
         '-O0',
+        // Build-time facts no running component can ask a host for: the
+        // directory the compiled entry point lives in (backing `Uri.base`)
+        // and the platform the build ran on (backing `_Uri._isWindows`).
+        // The embedder reads them through `String.fromEnvironment` /
+        // `bool.fromEnvironment` (see the embedder's weak.dart).
+        '-Ddart.wasm.baseUri=${Uri.directory(p.dirname(options.input.absolute.path))}',
+        '-Ddart.wasm.isWindows=${Platform.isWindows}',
         options.input.path,
         dart2wasmOut,
         '--recorded-uses',
