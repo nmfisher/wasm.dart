@@ -82,7 +82,31 @@ layout incl. `bin/dart`, `bin/dartaotruntime`,
 platform dills (`dart2wasm_standalone_platform.dill` etc.).
 
 Stage-0 rebuild attempt of the `runtime` + `dart2wasm` targets at the pinned
-ref: **in progress** — see the build log section at the end of this file.
+ref: **FAILED — exact blocker below** (recorded verbatim, not worked around).
+The `runtime` target's dependency graph pulls the
+`//utils/dart2wasm:ffi_native_test_wasm_module` step, which compiles a C test
+module with emscripten. This checkout was synced with the DEPS default
+`download_emscripten = False`, so the `install_emscripten`/`activate_emscripten`
+gclient hooks never ran and no `emcc` exists in the container.
+
+Raw error (both `runtime` and `dart2wasm` targets, ~1630/1643 steps in):
+
+```
+FAILED: [code=1] wasm/ffi_native_test_module.wasm
+python3 ../../build/gn_run_binary.py ../../third_party/emsdk/upstream/emscripten/emcc --no-entry ../../tests/web/wasm/ffi/ffi_native_test_module.c -o wasm/ffi_native_test_module.wasm -O
+Binary not found: /home/agent/dart-sdk-src/sdk/third_party/emsdk/upstream/emscripten/emcc
+ninja: build stopped: subcommand failed.
+buildtools/ninja/ninja -C out/ReleaseX64 runtime dart2wasm
+BUILD FAILED
+```
+
+Scope note: the failure is a **test fixture** (`tests/web/wasm/ffi/…`), not a
+product binary. The product artifacts the wasm.dart pipeline consumes
+(`out/ReleaseX64/dart-sdk/**` incl. `bin/dart`, `bin/dartaotruntime`,
+`bin/snapshots/dart2wasm_product.snapshot`, `lib/libraries.json`) were built
+completely (September 26 `create_sdk` build at this ref) and are what the rest
+of Stage 0 exercises. Everything else in the 1643-step graph compiled cleanly
+before the emcc step stopped it (~1630/1643).
 
 ## wasm.dart toolchain pins
 
@@ -176,5 +200,29 @@ through `wasi:cli/stdout`), re-run in the next section.
 
 ## SDK rebuild log
 
-(attempted `runtime` + `dart2wasm` targets at the pinned ref; outcome appended
-below)
+Attempted at the pinned ref in this container, from
+`/home/agent/dart-sdk-src/sdk`:
+
+```
+export PATH=/home/agent/depot_tools:/home/agent/.cargo/bin:/home/agent/bin:$PATH
+export DEPOT_TOOLS_UPDATE=0 GCLIENT_SUPPRESS_GIT_VERSION_WARNING=1
+python3 tools/build.py -m release -a x64 --no-rbe runtime dart2wasm
+```
+
+Outcome: BUILD FAILED after ~1630/1643 steps; the single failing step is
+`//utils/dart2wasm:ffi_native_test_wasm_module` needing
+`third_party/emsdk/upstream/emscripten/emcc`, which does not exist because the
+checkout was synced with `download_emscripten = False` (DEPS default) and the
+emsdk install hooks never ran. Raw error in the section above. Per the brief,
+the build part stops here; escalation (installing emsdk or syncing with
+`download_emscripten=True`) is expected and fine, but was not attempted in
+Stage 0.
+
+The prior, successful build of the SDK products at this ref used:
+
+```
+python3 tools/build.py -m release -a x64 --no-rbe create_sdk
+```
+
+(September 26, 2026; produces `out/ReleaseX64/dart-sdk/`, which Stage 0's exit
+test and suite runs use.)
