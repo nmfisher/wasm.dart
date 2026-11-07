@@ -15,6 +15,19 @@
 //      the linear memory with an allocator (`libc.*`), the component context
 //      slot and the result collector (`component._import*`).
 //
+//   4. The collector ABI matches the upstream host world
+//      (`wasmdart:tests/result-collector`): record-string,
+//      record-optional-string, record-string-list, record-double,
+//      record-int, record-bool, lowered in that order to
+//      `component._import0.._import5`. None renders as `<none>`, string
+//      lists render as `|`-joined strings, mirroring the native runner.
+//
+//      Cases needing the GC-box helpers (`getClassId`, `boxExternRef`,
+//      `unboxExternRef`) — currently `string.dart` — cannot run here: the
+//      component pipeline synthesizes them over the module's own GC heap,
+//      which a host cannot reach into. Run those through the full
+//      component pipeline (`test/component_test.dart`) instead.
+//
 // The output of a run must match the golden file next to the case. Golden
 // files are generated with `dart run tool/generate_test_goldens.dart`, which
 // executes the cases on the Dart VM. The wasm run and the VM run therefore
@@ -227,6 +240,33 @@ function makeCollector() {
   return { lines, recordDouble, recordInt, recordBool };
 }
 
+// Reads a canonical-ABI `string`: a packed UTF-16-LE code unit count plus a
+// pointer into linear memory.
+function readHostString(memory, ptr, packedLength) {
+  return readUtf16(memory, ptr, packedLength);
+}
+
+// Reads a canonical-ABI `option<string>`: a discriminator flag followed by the
+// string payload (present only when the discriminator is non-zero).
+function readOptionalHostString(memory, args) {
+  const [discriminant, ptr, packedLength] = args;
+  return discriminant === 0 ? null : readHostString(memory, ptr, packedLength);
+}
+
+// Reads a canonical-ABI `list<string>`: a pointer to a flat array of
+// `(ptr, packedLength)` pairs plus the element count.
+function readHostStringList(memory, args) {
+  const [arrayPointer, count] = args;
+  const view = new DataView(memory.buffer);
+  const result = [];
+  for (let i = 0; i < count; i++) {
+    const elementPointer = view.getUint32(arrayPointer + i * 8, true);
+    const elementLength = view.getUint32(arrayPointer + i * 8 + 4, true);
+    result.push(readHostString(memory, elementPointer, elementLength));
+  }
+  return result;
+}
+
 function runCase(dartFile, wasmFile) {
   compile(dartFile, wasmFile);
   const compiled = fs.readFileSync(wasmFile);
@@ -274,21 +314,70 @@ function runCase(dartFile, wasmFile) {
     };
   }
 
+  // Imports that the component pipeline handles in `transform.dart` but that
+  // a raw module cannot satisfy from its own exports:
+  //
+  // - The `wasi_*` clocks are stubbed by the transform when the case does not
+  //   use the corresponding host clock (returning 0 / a null reference). The
+  //   shims mirror those stubs.
+  // - `getClassId` / `boxExternRef` / `unboxExternRef` are synthesized by the
+  //   transform as functions that read and build GC structs of the module's
+  //   own box class. A host cannot reach into the module's GC heap, so these
+  //   are fail-loud: if a case actually relies on them, it must be run
+  //   through the full component pipeline instead.
+  const exportNames = new Set(
+    WebAssembly.Module.exports(module).map((info) => info.name),
+  );
+  for (const info of importInfos.filter((info) => info.module === 'dart')) {
+    if (exportNames.has(info.name)) continue;
+    if (['wasi_monotonic_now', 'wasi_monotonic_getResolution'].includes(info.name)) {
+      dart[info.name] = () => 0n;
+    } else if (['wasi_now', 'wasi_iana_id'].includes(info.name)) {
+      dart[info.name] = () => 0;
+    } else if (
+      ['getClassId', 'boxExternRef', 'unboxExternRef'].includes(info.name)
+    ) {
+      dart[info.name] = () => {
+        throw new Error(
+          `dart.${info.name} is only synthesized by the component ` +
+            'pipeline (transform.dart); the raw-module harness cannot ' +
+            'implement it.',
+        );
+      };
+    }
+  }
+
   const component = {
     'canon.context.get_i32_0': () => 0,
+    // The generated bindings lower the collector functions in the order the
+    // host world declares them (see `wasmdart_tests_root.json`):
+    // record-string, record-optional-string, record-string-list,
+    // record-double, record-int, record-bool.
     _import0: (ptr, packedLength) => {
       collector.lines.push(
         JSON.stringify({
           type: 'string',
-          value: readUtf16(libc.memory, ptr, packedLength),
+          value: readHostString(libc.memory, ptr, packedLength),
         }),
       );
     },
-    _import1: collector.recordDouble,
-    _import2: collector.recordInt,
-    _import3: collector.recordBool,
+    _import1: (...args) => {
+      const value = readOptionalHostString(libc.memory, args);
+      // Mirrors the native runner: a `None` renders as `<none>`.
+      collector.lines.push(
+        JSON.stringify({ type: 'string', value: value ?? '<none>' }),
+      );
+    },
+    _import2: (...args) => {
+      // Mirrors the native runner: the list renders as a `|`-joined string.
+      const value = readHostStringList(libc.memory, args).join('|');
+      collector.lines.push(JSON.stringify({ type: 'string', value }));
+    },
+    _import3: (value) => collector.recordDouble(value),
+    _import4: (value) => collector.recordInt(value),
+    _import5: (value) => collector.recordBool(value),
   };
-  // The collector imports are named _import0.._import3 in the generated
+  // The collector imports are named _import0.._import5 in the generated
   // bindings. Any import without a host implementation fails instantiation
   // with a clear message below.
   const componentImports = {};
