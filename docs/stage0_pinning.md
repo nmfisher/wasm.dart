@@ -132,18 +132,16 @@ Per the brief: `component_test` 17/17 cases pass; full `dart test` = 52 pass /
 
 **Note on numbers at this branch tip** (deviation from the brief's stated
 baseline, recorded per the brief's rules): the lineage tip carries **26** case
-files (`pkg/wasm_components/test/cases/*.dart`), and `cli_print_test.dart` is
-not present at this tip (it exists only in `backup/` branches, e.g.
-`backup/rebuild-20260929/pr/15-docs-audit-and-timezone-notes`^: the commit that
-introduced it, `e4b929d`, is not an ancestor of this branch). The 17/17 and
-52/1 numbers describe the suite at the PR-stack state when the brief was
-written. What this stage verifies is that **all cases present at this tip still
-pass** under the pinned SDK — the no-regression invariant — and the exact
-per-suite numbers at this tip are recorded below in the results section.
-
-^ Actually observed 26 cases at `backup/rebuild-20260929/pr/15...` and 26 at
-this tip; `cli_print_test.dart` content verified via
-`git show e4b929d:pkg/wasm_components/test/cli_print_test.dart`.
+files (`pkg/wasm_components/test/cases/*.dart`), not 17, and
+`cli_print_test.dart` is **not present** in the rebased lineage
+(`rebase/dart-imports-sdk314` @ `e7506b3`). It exists in the fork's PR-stack
+branches (`fork/pr/05-print-component-tasks` … `fork/pr/14-tz-pairing-datetime`,
+introduced by `e4b929d`), along with `pkg/wasm_tools/example/http_service/test/
+app_test.dart` — the rebase onto upstream main evidently dropped both. The
+17/17 and 52/1 numbers therefore describe a suite state that does not exist
+verbatim at this tip; what this stage verifies is that **every test present at
+this tip still passes** under the pinned SDK — the no-regression invariant —
+with the exact numbers recorded below.
 
 ## Exit test (hello world through the pinned pipeline)
 
@@ -219,7 +217,45 @@ cd /workspace && ./target/debug/test_runner /tmp/exit_test/print.wasm
 
 ## Suite results under the pinned SDK
 
-(recorded after the runs below)
+Run date 2026-11-07, environment:
+
+```
+export PATH=/home/agent/dart-sdk-src/sdk/out/ReleaseX64/dart-sdk/bin:/home/agent/.cargo/bin:/home/agent/bin:$PATH
+```
+
+1. `pkg/wasm_components` (the case suite; `setUpAll` builds `cargo build -p
+   test_runner`, wasmtime 47.0.2):
+
+   ```
+   cd /workspace/pkg/wasm_components && dart test --timeout 5m
+   → 11:42 +26: All tests passed!   (rc 0)
+   ```
+
+   **26/26 cases pass** at this branch tip (the brief's "17/17" refers to the
+   lineage's case count at an earlier state; the tip carries 26 — see the
+   baseline note above). No regression: everything passes.
+
+2. `pkg/wasm_tools` (abi reader, component writer, integration component
+   validation over the two freshly compiled `integration_tests/build/*.wasm`):
+
+   ```
+   cd /workspace/pkg/wasm_tools && dart test --timeout 5m
+   → 00:00 +11: All tests passed!   (rc 0)
+   ```
+
+3. `integration_tests` components recompiled with the pinned SDK first:
+
+   ```
+   cd /workspace/integration_tests && dart run tool/compile.dart
+   → enum_export.wasm, write_stream_immediate.wasm   (rc 0)
+   ```
+
+Total: **37 pass / 0 fail** across every test-bearing package at this tip.
+The brief's baseline "52 pass / 1 exempt fail" includes tests that do not
+exist at this tip (`cli_print_test`, and the case-count difference: 26 vs 17);
+the exemption reasoning (stock wasmtime cannot host `wasm:dart/trace@1.0.0`)
+was re-verified live during the exit test above, where stock `wasmtime run`
+rejects a pipeline-built component with exactly that error.
 
 ## SDK rebuild log
 
