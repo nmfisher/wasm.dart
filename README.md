@@ -11,6 +11,22 @@ These components can run in `wasmtime run` and `wasmtime serve` without further 
 > A _much_ better way to embed `dart2wasm` into existing applications is to use
 > a [custom embedder](https://github.com/simolus3/standalone-embedders).
 
+> [!NOTE]
+> Running the compiled components under Wasmtime requires a Dart SDK that emits
+> standard Wasm exception instructions (`try_table`): **a Dart SDK
+> `^3.14.0-251.0.dev`** (`pkg/wasm_tools` already pins that requirement).
+> Use a compatible main-channel SDK or build the SDK from source when the
+> released SDKs are older; `pub get` fails on SDK versions below it.
+>
+> Older dart2wasm emitted the legacy `try` instruction in SDK internals, which
+> Wasmtime does not implement, so compiled components validated but could not
+> run there. From `3.14.0-251.0.dev` (commit `de942dbb`, *"[dart2wasm]
+> Translate exceptions to try_table instructions"*) dart2wasm emits
+> `try_table`/`throw_ref` instead, and compiled components run under Wasmtime
+> with no special flags. Verified with Wasmtime 47.0.4: `wasmtime run` on
+> `pkg/wasm_tools/example/hello_world_wasi` prints the expected output and
+> exits 0.
+
 ## Approach
 
 Via the experimental `--standalone` mode, Dart can compile to WebAssembly with Dart-specific, documented [host imports](https://github.com/dart-lang/sdk/blob/main/sdk/lib/_internal/wasm/standalone/embedder.dart).
@@ -48,3 +64,23 @@ Most Dart SDK features are implemented, missing are:
     Improvements are not in scope for this prototype.
 - Weak references, finalizers and expandos are not supported.
 - `dart:developer` is mostly unsupported.
+
+## Component tests
+
+The integration suite compiles `pkg/wasm_components/test/cases/*.dart` into
+components, executes them with the Rust/Wasmtime runner, and compares the output
+with the Dart VM goldens. It exercises the component linker and the Rust runtime
+helper, including its allocator.
+
+With a compatible Dart SDK and Rust/Cargo installed, run from the repository root:
+
+```sh
+dart pub get
+rustup toolchain install nightly --component rust-src
+./pkg/wasm_tools/tool/build_runtime_helpers.sh
+cd pkg/wasm_components
+dart test test/component_test.dart --reporter expanded --timeout 5m
+```
+
+`pkg/wasm_components/tool/run_cases.mjs` remains useful as a Rust-free way to
+run the case suite in Node.
