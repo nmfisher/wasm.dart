@@ -189,10 +189,33 @@ The `wasm:dart/trace@1.0.0` failure under stock wasmtime is the documented
 exemption class (README note at top; `cli_print_test`'s exemption): the embedder
 keeps `dart.stackTrace*` reachable from core error paths, so every component
 carries the trace dependency, and only a host linking `wasm:dart/*` — the
-case suite's Rust runner — can run it. The run path that exercises
-"hello-world through the wasm.dart pipeline under wasmtime" is the case suite
-itself (its `print` case is precisely a hello-world: it prints two lines
-through `wasi:cli/stdout`), re-run in the next section.
+case suite's Rust runner — can run it.
+
+### Exit test result: PASS
+
+The run path that exercises "hello world through the wasm.dart pipeline under
+wasmtime" uses the suite's `print` case — a literal hello world (two `print`
+lines lowered to `wasi:cli/stdout` writes) — compiled with the **pinned SDK**
+through the full pipeline (embedder self-linked by `wasm_tools`), executed by
+the wasmtime 47.0.2 reference host:
+
+```bash
+export PATH=/home/agent/dart-sdk-src/sdk/out/ReleaseX64/dart-sdk/bin:/home/agent/.cargo/bin:/home/agent/bin:$PATH
+cd /workspace/pkg/wasm_components
+dart run wasm_tools compile test/cases/print.dart \
+  --output /tmp/exit_test/print.wasm \
+  --hooks-include-dev-dependencies --no-implicit-wasi-imports
+# [FINE] compiler: Patching 26 functions
+# [FINE] compiler: Patched 630 references
+# [INFO] compiler: Writing component to /tmp/exit_test/print.wasm   (rc=0)
+
+cd /workspace && ./target/debug/test_runner /tmp/exit_test/print.wasm
+# {"type":"start","test":0}
+# {"type":"bool","value":true}
+# hello from wasm
+# second line
+# {"type":"end","test":0}                                        (rc=0)
+```
 
 ## Suite results under the pinned SDK
 
