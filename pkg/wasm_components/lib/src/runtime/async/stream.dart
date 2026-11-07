@@ -326,6 +326,13 @@ final class StreamReadState<T extends List<Object?>> {
     _readBufferSize = max(bufferSize ~/ _elementSize, 1);
 
     _task.readStreams[_id] = this;
+    // A read that blocks parks this task on its waitable set, so the
+    // readable end has to be a member of that set - exactly like the
+    // writable end in `newReadableStream`. Without the join, a host-side
+    // producer can set its StreamRead event, but the event is never
+    // delivered to the set the task waits on: the guest sleeps forever
+    // (the first host-provided readable stream deadlocks).
+    _task.waitable.addWaitable(WasmI32.fromInt(_id));
     _controller.onResume = _resume;
     _startReading();
   }
