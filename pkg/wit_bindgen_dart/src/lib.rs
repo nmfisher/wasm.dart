@@ -113,10 +113,14 @@ fn wit_bindgen_dart_internal(input: GenerateDartOptions) -> anyhow::Result<Vec<G
 
         let mut dart = DartSource::new(&import_map);
         if !package.docs.is_empty() {
+            // Package docs become a `library;` directive, which Dart
+            // requires before all other directives - so it goes to the
+            // preamble the header emits before its imports.
             let mut library_directive = DartDefinition::default();
             library_directive.write_docs(&package.docs);
             uwriteln!(&mut library_directive, "library;");
-            dart.consume_definition(library_directive);
+            let DartDefinition(text) = &library_directive;
+            dart.preamble.push_str(text);
         }
 
         for (_, interface) in &package.interfaces {
