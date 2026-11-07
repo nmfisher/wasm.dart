@@ -255,9 +255,7 @@ async fn async_main() -> Result<()> {
     // components that import `tina:process/process@1.0.0` reach it.
     tina_process::add_to_linker(&mut linker)?;
 
-    eprintln!("[runner] instantiating");
     let instance = linker.instantiate_async(&mut store, &component).await?;
-    eprintln!("[runner] instantiated");
     let count = instance.get_func(&mut store, count_test_idx).unwrap();
     let invoke = instance.get_func(&mut store, invoke_test_idx).unwrap();
 
@@ -283,7 +281,6 @@ async fn async_main() -> Result<()> {
             };
 
             for i in 0..num_tests {
-                eprintln!("[runner] invoking test {i}");
                 post_event(&TestEvent::TestStart { test: i });
                 invoke
                     .call_concurrent(accessor, &[Val::U32(i)], &mut [])
