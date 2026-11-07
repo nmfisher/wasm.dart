@@ -10,3 +10,12 @@ wasmtime = "47.0.2"
 wasmtime-wasi = { version = "47.0.2", features = ["p3"] }
 tokio = { version = "1", features = ["rt"] }
 env_logger = "0.11.11"
+# The tina:http host implementation. rustls-tls (no native TLS) keeps the
+# host free of an OpenSSL build dependency; `stream` gives response byte
+# streams for SSE-style bodies.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "stream",
+] }
+futures = "0.3"
+bytes = "1"

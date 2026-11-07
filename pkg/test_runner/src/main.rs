@@ -23,6 +23,8 @@ use wasmtime::{
 };
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p3};
 
+mod tina_http;
+
 fn main() -> Result<()> {
     // Wasmtime's concurrent (async component model) internals log under the
     // `wasmtime` target; `RUST_LOG=wasmtime=trace` is invaluable when a guest
@@ -56,11 +58,41 @@ async fn async_main() -> Result<()> {
     // Guest prints go through our own stdout sink (see `TrackedStdout`) so the
     // run loop can tell when a case's write has fully landed.
     let stdout = TrackedStdout::default();
+
+    // Optional tina engine environment, passed on the command line after the
+    // component path: `--preopen=guest_dir=host_dir` exposes a host directory
+    // through a WASI preopen, `--env=NAME=VALUE` sets a WASI environment
+    // variable. The case suite passes neither, so its runs are unchanged.
+    let mut wasi = WasiCtxBuilder::new();
+    wasi.stdout(stdout.clone());
+    for arg in env::args().skip(2) {
+        if let Some(spec) = arg.strip_prefix("--preopen=") {
+            let (guest, host) = spec.split_once('=').ok_or_else(|| {
+                wasmtime::Error::msg(format!("--preopen expects guest_dir=host_dir, got {spec}"))
+            })?;
+            wasi.preopened_dir(
+                host,
+                guest,
+                wasmtime_wasi::DirPerms::all(),
+                wasmtime_wasi::FilePerms::all(),
+            )
+            .map_err(|e| wasmtime::Error::msg(format!("preopening {host} as {guest}: {e}")))?;
+        } else if let Some(spec) = arg.strip_prefix("--env=") {
+            let Some((name, value)) = spec.split_once('=') else {
+                wasmtime::bail!("--env expects NAME=VALUE, got {spec}");
+            };
+            wasi.env(name, value);
+        } else {
+            wasmtime::bail!("Unknown argument {arg}");
+        }
+    }
+
     let mut store = Store::new(
         &engine,
         HostState {
-            wasi: WasiCtxBuilder::new().stdout(stdout.clone()).build(),
+            wasi: wasi.build(),
             table: ResourceTable::new(),
+            http: reqwest::Client::new(),
         },
     );
 
@@ -175,6 +207,9 @@ async fn async_main() -> Result<()> {
     // `wasi:random/insecure` (Random); without these the instantiation
     // fails with a missing import.
     p3::add_to_linker::<HostState>(&mut linker)?;
+    // The tina engine's HTTP port, served host-side with reqwest. Only
+    // components that import `tina:http/client@1.0.0` reach it.
+    tina_http::add_to_linker(&mut linker)?;
 
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let count = instance.get_func(&mut store, count_test_idx).unwrap();
@@ -224,10 +259,18 @@ async fn async_main() -> Result<()> {
 }
 
 /// The state the WASI host functions use: the WASI configuration (stdout)
-/// and the resource table its streams live in.
+/// and the resource table its streams live in, plus the shared reqwest
+/// client behind the `tina:http` import.
 struct HostState {
     wasi: WasiCtx,
     table: ResourceTable,
+    http: reqwest::Client,
+}
+
+impl HostState {
+    fn http_client(&self) -> reqwest::Client {
+        self.http.clone()
+    }
 }
 
 impl WasiView for HostState {
