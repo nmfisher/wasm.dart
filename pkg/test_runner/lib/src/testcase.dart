@@ -1,3 +1,5 @@
+import 'dart:async';
+
 abstract interface class BaseResultCollector {
   void recordString({required String e});
   void recordOptionalString({required String? e});
@@ -7,7 +9,7 @@ abstract interface class BaseResultCollector {
   void recordBool({required bool e});
 }
 
-typedef TestCase = void Function(BaseResultCollector collector);
+typedef TestCase = FutureOr<void> Function(BaseResultCollector collector);
 
 Object serializeTestStart(int number) {
   return {'type': 'start', 'test': number};

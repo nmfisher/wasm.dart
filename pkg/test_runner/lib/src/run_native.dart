@@ -1,12 +1,20 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'testcase.dart';
 
 void defineTests(List<TestCase> cases) {
+  // Case bodies may be async: run them one after another on the VM's event
+  // loop. Pending timers and microtasks keep the isolate alive until every
+  // case has finished.
+  unawaited(_runAll(cases));
+}
+
+Future<void> _runAll(List<TestCase> cases) async {
   for (final (idx, run) in cases.indexed) {
     _printJson(serializeTestStart(idx));
     try {
-      run(const _PrintRunner());
+      await run(const _PrintRunner());
     } finally {
       _printJson(serializeTestEnd(idx));
     }
