@@ -83,7 +83,10 @@ import 'string.dart';
   );
   defineString(r'$0', '0');
   defineCharCodes('digits', '0123456789abcdefghijklmnopqrstuvwxyz');
-  defineString('unknownTimezone', 'UNKNOWN TZ');
+  // Claims UTC: the runtime always pairs the zone id with a zero offset
+  // (see wasiIanaId in clock.dart), so a name like "UNKNOWN TZ" would
+  // disagree with the offset it is reported alongside.
+  defineString('unknownTimezone', 'UTC');
   defineString('nan', 'NaN');
   defineString('infinity', 'Infinity');
   defineString('negativeInfinity', '-Infinity');
