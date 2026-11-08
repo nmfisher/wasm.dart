@@ -44,6 +44,16 @@ final class _PrintRunner implements BaseResultCollector {
   }
 
   @override
+  void recordOptionalString({required String? e}) {
+    _printJson(serializeRecordedString(e ?? '<none>'));
+  }
+
+  @override
+  void recordStringList({required List<String> e}) {
+    _printJson(serializeRecordedString(e.join('|')));
+  }
+
+  @override
   void recordBool({required bool e}) {
     _printJson(serializeRecordedBool(e));
   }

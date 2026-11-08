@@ -2,6 +2,8 @@ import 'dart:async';
 
 abstract interface class BaseResultCollector {
   void recordString({required String e});
+  void recordOptionalString({required String? e});
+  void recordStringList({required List<String> e});
   void recordDouble({required double e});
   void recordInt({required int e});
   void recordBool({required bool e});

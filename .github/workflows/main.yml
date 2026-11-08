@@ -40,7 +40,7 @@ jobs:
     timeout-minutes: 5
     strategy:
       matrix:
-        dart: [dev]
+        dart: [beta]
 
     name: Analyze ${{ matrix.package }}
     runs-on: ubuntu-latest
@@ -51,7 +51,6 @@ jobs:
     - uses: dart-lang/setup-dart@v1
       with:
         sdk: ${{ matrix.dart }}
-        flavor: raw
     - uses: actions/cache@v5
       with:
         path: "${{ env.PUB_CACHE }}"
@@ -82,7 +81,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        dart: [dev]
+        dart: [beta]
     needs: [compile_rust]
     steps:
     - uses: actions/checkout@v6
@@ -91,7 +90,6 @@ jobs:
     - uses: dart-lang/setup-dart@v1
       with:
         sdk: ${{ matrix.dart }}
-        flavor: raw
     - uses: actions/cache@v5
       with:
         path: "${{ env.PUB_CACHE }}"
@@ -119,6 +117,9 @@ jobs:
     - name: Compile integration test components
       working-directory: integration_tests
       run: dart run tool/compile.dart
+    - name: Test wasm_components
+      working-directory: pkg/wasm_components
+      run: dart test
     - name: Test wasm_tools
       working-directory: pkg/wasm_tools
       run: dart test

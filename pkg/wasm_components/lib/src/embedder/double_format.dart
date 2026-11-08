@@ -83,6 +83,11 @@ Latin1String doubleToString(double value) {
 /// [double.toStringAsExponential]. A negative [fractionDigits] means the
 /// shortest representation is used (that is how the SDK's
 /// `Double.toStringAsExponential()` calls the import).
+///
+/// Negative zero renders unsigned, like JS (`-0 < 0` is false there, so
+/// `(-0).toExponential(2)` is `"0.00e+0"`): the SDK patch that calls this
+/// import re-adds the sign for `-0` itself, and a signed result here would
+/// double it.
 Latin1String doubleToExponentialWithFractionDigits(
   double value,
   int fractionDigits,
@@ -102,11 +107,7 @@ Latin1String doubleToExponential(double value, int? fractionDigits) {
   String mantissa;
   var exponent = 0;
   if (value == 0) {
-    if (value.isNegative) {
-      mantissa = '-0';
-    } else {
-      mantissa = '0';
-    }
+    mantissa = '0';
     if (fractionDigits != null && fractionDigits > 0) {
       mantissa = '$mantissa.${'0' * fractionDigits}';
     }
@@ -122,7 +123,9 @@ Latin1String doubleToExponential(double value, int? fractionDigits) {
   return _latin1('${mantissa}e$sign$exponent');
 }
 
-/// Formats like `Number.prototype.toPrecision`.
+/// Formats like `Number.prototype.toPrecision`. Negative zero renders
+/// unsigned here (the SDK patch re-adds the sign; see
+/// [doubleToExponentialWithFractionDigits]).
 Latin1String doubleToPrecision(double value, int precision) {
   if (value.isNaN) return _nan;
   if (value == double.infinity) return _infinity;
@@ -130,7 +133,7 @@ Latin1String doubleToPrecision(double value, int precision) {
 
   final digits = _roundedDigits(value, precision);
   final decimalExponent = digits.exponent + digits.count - 1;
-  final negative = value.isNegative;
+  final negative = value.isNegative && value != 0;
 
   // JS uses plain notation when the decimal exponent is in (-7, precision).
   if (decimalExponent >= -7 && decimalExponent < precision) {
@@ -142,7 +145,9 @@ Latin1String doubleToPrecision(double value, int precision) {
   return _latin1('${mantissa}e$sign$decimalExponent');
 }
 
-/// Formats like `Number.prototype.toFixed`.
+/// Formats like `Number.prototype.toFixed`. Negative zero renders
+/// unsigned here (the SDK patch re-adds the sign; see
+/// [doubleToExponentialWithFractionDigits]).
 Latin1String doubleToFixed(double value, int fractionDigits) {
   if (value.isNaN) return _nan;
   if (value == double.infinity) return _infinity;
@@ -156,7 +161,7 @@ Latin1String doubleToFixed(double value, int fractionDigits) {
   // toFixed rounds at the *fraction place*, not at a significant-digit
   // count, so compute the integer n closest to x * 10^f (ties away from
   // zero) directly on the exact binary value.
-  final negative = value.isNegative;
+  final negative = value.isNegative && value != 0;
   final abs = value.abs();
   final d = _decompose(abs);
   // n = closest integer to abs * 10^fractionDigits. A rounding rollover

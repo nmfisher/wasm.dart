@@ -43,6 +43,7 @@ The main packages in this repository are:
 
 1. `wasm_tools`: CLI tools to generate wit bindings from Dart and to compile Dart to components.
 2. `wasm_components`: Dart runtime for the component model.
+3. `wasi`: Generated bindings and helpers to compile Dart as a WASI (CLI or HTTP service) guest — merged from upstream `main`, including its HTTP client and `serveWasiShelf` experiments; the case suite here does not exercise them.
 
 ## Demo
 

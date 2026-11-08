@@ -25,6 +25,7 @@ final class ModuleTransformer {
   late final Map<String, w.Export> _exports = {
     for (final export in module.exports.exported) export.name: export,
   };
+  w.StructType? _externRefWrapperType;
 
   ModuleTransformer(
     this.module,
@@ -42,6 +43,28 @@ final class ModuleTransformer {
       logger,
       implicitWasiDependencies: implicitWasiDependencies,
     );
+  }
+
+  w.StructType _findExternRefWrapperType() {
+    if (_externRefWrapperType case final known?) return known;
+
+    // Find the first struct type with (const i32), (var i32), (var externref)
+    // fields.
+    for (final type in module.types.defined) {
+      if (type is w.StructType && type.fields.length == 3) {
+        final [classId, hashCode, externRef] = type.fields;
+        if (classId.mutable || classId.type != w.NumType.i32) continue;
+        if (!hashCode.mutable || hashCode.type != w.NumType.i32) continue;
+        if (!externRef.mutable ||
+            externRef.type != w.RefType.extern(nullable: true)) {
+          continue;
+        }
+
+        return _externRefWrapperType = type;
+      }
+    }
+
+    throw StateError('Could not find EmbedderStringImpl type in module');
   }
 
   Uint8List serialize() {
@@ -77,6 +100,12 @@ final class ModuleTransformer {
       'stackTraceToString': _StackTraceImports(),
       'timelineStreamEnabled': _TimelineImports(),
       'reportTaskEvent': _TimelineImports(),
+      // Upstream's externref support (the merged `wasi` package's host
+      // interop): box/unbox and class ids resolve inside the guest using
+      // the embedder's own string wrapper struct.
+      'unboxExternRef': _DarkArtsImports(),
+      'boxExternRef': _DarkArtsImports(),
+      'getClassId': _DarkArtsImports(),
     };
 
     // First pass: run the replacers for all `dart.*` imports before anything
@@ -1015,5 +1044,97 @@ final class _TimelineImports extends _ComponentImport {
     );
     transformer.module.functions.defined.add(stubFunction);
     transformer._patchFunctions[importedFunction] = stubFunction;
+  }
+}
+
+final class _DarkArtsImports extends _ComponentImport {
+  const _DarkArtsImports();
+
+  @override
+  bool addTo(
+    ProgramAbi abi,
+    ModuleTransformer transformer,
+    w.ImportedFunction function,
+  ) {
+    final targetType = transformer._findExternRefWrapperType();
+    w.DefinedFunction replacement;
+
+    switch (function.name) {
+      case 'unboxExternRef':
+        replacement = w.DefinedFunction(
+          transformer.module,
+          w.Instructions(
+            [],
+            {},
+            [
+              w.LocalGet(w.Local(0, function.type.inputs[0])),
+              // The parameter we receive is a (ref any). Begin by casting to
+              // the string type.
+              w.RefCast(w.RefType.def(targetType, nullable: false)),
+              // Read the externref field.
+              w.StructGet(targetType, 2),
+              w.End(),
+            ],
+            null,
+            [],
+            null,
+          ),
+          w.FinalizableIndex(),
+          function.type,
+          'unboxExternRefImpl',
+        );
+      case 'getClassId':
+        replacement = w.DefinedFunction(
+          transformer.module,
+          w.Instructions(
+            [],
+            {},
+            [
+              w.LocalGet(w.Local(0, function.type.inputs[0])),
+              w.RefCast(w.RefType.def(targetType, nullable: false)),
+              // Read the classId field.
+              w.StructGet(targetType, 0),
+              w.End(),
+            ],
+            null,
+            [],
+            null,
+          ),
+          w.FinalizableIndex(),
+          function.type,
+          'getClassIdImpl',
+        );
+      case 'boxExternRef':
+        replacement = w.DefinedFunction(
+          transformer.module,
+          w.Instructions(
+            [],
+            {},
+            [
+              // First field: class id (passed as the first parameter).
+              w.LocalGet(w.Local(0, function.type.inputs[0])),
+              // Second field: Hash code (zero acts as a sentinel)
+              w.I32Const(0),
+              // Third field: Externref, passed as second parameter.
+              w.LocalGet(w.Local(1, function.type.inputs[1])),
+              // Create struct
+              w.StructNew(targetType),
+              w.End(),
+            ],
+            null,
+            [],
+            null,
+          ),
+          w.FinalizableIndex(),
+          function.type,
+          'boxExternRefImpl',
+        );
+      default:
+        return false;
+    }
+
+    transformer.module.functions.defined.add(replacement);
+    transformer._patchFunctions[function] = replacement;
+    return true;
   }
 }

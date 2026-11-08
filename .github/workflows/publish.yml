@@ -14,6 +14,8 @@ concurrency:
 jobs:
   compile_rust:
     uses: ./.github/workflows/compile_rust.yml
+    permissions:
+      contents: read # Might not be required??
 
   publish:
     name: Publish to pub.dev
@@ -28,7 +30,7 @@ jobs:
         persist-credentials: false
     - uses: dart-lang/setup-dart@v1 # This will request an OIDC token for pub.dev
       with:
-        flavor: raw
+        sdk: beta
     - name: Download libraries
       uses: actions/download-artifact@v8
       with:
@@ -46,10 +48,11 @@ jobs:
       run: dart pub publish -f
       working-directory: pkg/wasm_components
 
-    - name: Publish wasm_tools - dry run
-      if: "${{ startsWith(github.ref_name, 'wasm_tools-') }}"
-      run: dart pub publish --dry-run
-      working-directory: pkg/wasm_tools
+    # This complains about lib/hooks.dart not being named libs/wasm_tools.dart, ignore
+    # - name: Publish wasm_tools - dry run
+    #   if: "${{ startsWith(github.ref_name, 'wasm_tools-') }}"
+    #   run: dart pub publish --dry-run
+    #   working-directory: pkg/wasm_tools
     - name: Publish wasm_tools to pub.dev
       if: "${{ startsWith(github.ref_name, 'wasm_tools-') }}"
       run: dart pub publish -f

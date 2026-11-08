@@ -10,5 +10,5 @@ RUSTFLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpanic=im
     --target wasm32-unknown-unknown \
     -p runtime_helpers
 
-TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | jq '.target_directory' -r)
 cp "$TARGET_DIR/wasm32-unknown-unknown/release/runtime_helpers.wasm" assets/
