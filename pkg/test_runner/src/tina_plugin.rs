@@ -454,6 +454,111 @@ mod tests {
     }
 
     #[test]
+    fn dummy_stateful_plugin_proves_the_full_stateful_contract() {
+        // One dummy artifact, six proof points on the current interface:
+        // state held across calls, the explicitly granted engine service,
+        // reload survival (predecessor Store keeps its state), an
+        // epoch kill mid-call on the dummy's own kill marker, a fresh
+        // reopen afterwards, and a clean unload with the boundary still
+        // serving. No interface extension, no richer prompt frame.
+        let dir = std::env::temp_dir()
+            .join(format!("issue85-stateful-proof-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let artifact = dir.join("stateful_proof.component.wasm");
+        let bytes = include_bytes!("../testdata/plugin_probe/stateful_proof.component.wasm");
+        std::fs::write(&artifact, bytes).unwrap();
+
+        let engine = engine();
+        let limits = || PluginLimits {
+            call_deadline: Duration::from_millis(200),
+            epoch_tick: Duration::from_millis(5),
+            ..PluginLimits::default()
+        };
+
+        // Explicit grant: without `allow_read_context` the guest's service
+        // call is denied and the run fails closed.
+        let ungranted =
+            TinaPluginRuntime::with_limits(engine.clone(), bytes.to_vec(), false, limits()).unwrap();
+        let lease = ungranted.open().unwrap();
+        assert!(matches!(
+            ungranted.on_prompt(&lease, frame("proof-session", "model-a")),
+            Err(TinaPluginError::Denied)
+        ));
+        ungranted.close(&lease).unwrap();
+
+        // Granted runtime in watch mode.
+        let runtime =
+            TinaPluginRuntime::watching_artifact(engine, artifact.clone(), true, limits()).unwrap();
+        let lease1 = runtime.open().unwrap();
+        let section = runtime
+            .on_prompt(&lease1, frame("proof-session", "model-a"))
+            .unwrap();
+        assert!(section.contains("proof-session") && section.contains("model-a"));
+        assert!(section.contains("run=1"));
+        let section = runtime
+            .on_prompt(&lease1, frame("proof-session", "model-a"))
+            .unwrap();
+        assert!(section.contains("run=2"), "state held across calls: {section:.80}");
+
+        // Reload survival: rewrite the artifact (simulating a rebuild);
+        // the next attach gets a fresh Store while the predecessor keeps
+        // its own counter.
+        std::fs::write(&artifact, bytes).unwrap();
+        let lease2 = runtime.open().unwrap();
+        assert_ne!(lease1, lease2);
+        let section = runtime
+            .on_prompt(&lease2, frame("proof-session", "model-b"))
+            .unwrap();
+        assert!(section.contains("run=1"), "fresh store after reload: {section:.80}");
+        let section = runtime
+            .on_prompt(&lease1, frame("proof-session", "model-a"))
+            .unwrap();
+        assert!(
+            section.contains("run=3"),
+            "predecessor state survived the reload: {section:.80}"
+        );
+
+        // Epoch kill mid-call on the dummy's own kill marker: the new
+        // store's lease is revoked, the boundary stays usable.
+        let started = Instant::now();
+        assert!(matches!(
+            runtime.on_prompt(&lease2, frame("proof-session", "kill-me")),
+            Err(TinaPluginError::Failed)
+        ));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "epoch kill took {elapsed:?}; deadline did not interrupt the guest"
+        );
+        assert_eq!(
+            runtime.close(&lease2),
+            Err(TinaPluginError::Denied),
+            "a killed lease is already revoked and cannot be closed again"
+        );
+
+        // Fresh reopen after the kill: the counter restarts.
+        let lease3 = runtime.open().unwrap();
+        let section = runtime
+            .on_prompt(&lease3, frame("proof-session", "model-c"))
+            .unwrap();
+        assert!(section.contains("run=1"), "{section:.80}");
+
+        // Clean unload, session continues: the predecessor closes cleanly
+        // and a final open/call/close cycle still works.
+        runtime.close(&lease1).unwrap();
+        let lease4 = runtime.open().unwrap();
+        let section = runtime
+            .on_prompt(&lease4, frame("proof-session", "model-a"))
+            .unwrap();
+        assert!(section.contains("run=1"), "{section:.80}");
+        runtime.close(&lease4).unwrap();
+        runtime.close(&lease3).unwrap();
+
+        let _ = std::fs::remove_file(&artifact);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
     fn open_during_active_call_is_busy_without_blocking() {
         let runtime = spin_runtime(Duration::from_millis(200));
         let lease = runtime.open().unwrap();
