@@ -33,7 +33,7 @@ implementation.
 ## Runner arguments
 
 ```
-test_runner file.wasm [--preopen=guest_dir=host_dir]... [--env=NAME=VALUE]...
+tina-wasm-host file.wasm [--preopen=guest_dir=host_dir]... [--env=NAME=VALUE]...
 ```
 
 `--preopen` exposes a host directory inside the guest as a WASI preopen

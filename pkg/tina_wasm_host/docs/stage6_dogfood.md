@@ -13,7 +13,7 @@ Stage 5 recorded 75.4 s to `ready` from a spawned runner and blamed
 | runner | boot to full exit (shutdown served) | peak RSS |
 |---|---|---|
 | debug (`cargo build`) | 81-84 s | ~393 MiB |
-| release (`cargo build --release -p test_runner`) | **4.3-5.1 s** | ~352 MiB |
+| release (`cargo build --release -p tina-wasm-host`) | **4.3-5.1 s** | ~352 MiB |
 
 Same component (1.82 MB engine), same host, direct or spawned — the
 16× difference is the debug binary's unoptimized cranelift compiling
@@ -36,7 +36,7 @@ it only marginally.
 ## Recipe update
 
 - Build the runner release when serving the engine:
-  `cargo build --release -p test_runner`
+  `cargo build --release -p tina-wasm-host`
 - The engine component itself still compiles with the pinned
   3.14-edge SDK (`wasm_tools` requires it; `dart2wasm` from older
   SDKs emits the legacy `try` instruction wasmtime rejects —

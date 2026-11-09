@@ -10,7 +10,7 @@ Use an isolated `wasm.dart` checkout on the integrated generator source branch, 
 cd /tmp
 ISSUE85_CARGO_TARGET=/path/to/private/warmed/target \
 ISSUE85_RUNTIME_HELPERS=/path/to/existing/runtime_helpers.wasm \
-  /path/to/wasm.dart/pkg/test_runner/testdata/plugin_probe/regenerate_fixture.sh \
+  /path/to/wasm.dart/pkg/tina_wasm_host/testdata/plugin_probe/regenerate_fixture.sh \
   /path/to/isolated/wasm.dart-checkout /tmp/plugin.component.wasm
 ```
 

@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use test_runner::plugin_loader::{
+use tina_wasm_host::plugin_loader::{
     PluginBoundary, PluginCallFrame, PluginLimits, plugin_engine_config,
 };
 
@@ -49,7 +49,7 @@ fn main() {
     let spin_bytes = std::fs::read(&args[2]).expect("spin component");
 
     println!(
-        "{{\"event\":\"identities\",\"test_runner\":\"{}\",\"profile\":\"{}\"}}",
+        "{{\"event\":\"identities\",\"host\":\"{}\",\"profile\":\"{}\"}}",
         env!("CARGO_PKG_VERSION"),
         if cfg!(debug_assertions) { "debug" } else { "release" },
     );
@@ -73,15 +73,15 @@ fn main() {
     );
 
     // --- boundary lifecycle on the real plugin ---
-    let broker: std::sync::Arc<dyn test_runner::plugin_loader::PluginServiceBroker> =
-        std::sync::Arc::new(test_runner::plugin_loader::EchoBroker);
+    let broker: std::sync::Arc<dyn tina_wasm_host::plugin_loader::PluginServiceBroker> =
+        std::sync::Arc::new(tina_wasm_host::plugin_loader::EchoBroker);
     let mut boundary = PluginBoundary::with_limits(
         engine.clone(),
         broker.clone(),
         PluginLimits::default(),
     )
     .unwrap();
-    let policy = test_runner::plugin_loader::PluginPolicy {
+    let policy = tina_wasm_host::plugin_loader::PluginPolicy {
         allow_engine_service_import: true,
         allow_engine_service_call: true,
     };

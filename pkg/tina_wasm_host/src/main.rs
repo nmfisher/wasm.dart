@@ -29,7 +29,7 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiVie
 mod tina_http;
 mod tina_process;
 
-use test_runner::tina_plugin;
+use tina_wasm_host::tina_plugin;
 
 fn main() -> Result<()> {
     // Wasmtime's concurrent (async component model) internals log under the
@@ -156,14 +156,14 @@ async fn async_main() -> Result<()> {
     let plugin_runtime = if let Some(path) = plugin_path {
         let bytes = fs::read(&path)
             .with_context(|| format!("Reading plugin artifact {}", path.display()))?;
-        test_runner::plugin_loader::verify_embedder_abi(&bytes)
+        tina_wasm_host::plugin_loader::verify_embedder_abi(&bytes)
             .context("plugin embedder ABI preflight")?;
         wasi.env("TINA_WASM_PLUGIN_ID", "tina/wasm-prompt");
         // Plugin exports are synchronous in this ABI, and the boundary needs
         // epoch interruption for per-call deadlines. A separate engine avoids
         // calling sync Store APIs on the async-enabled Tina engine.
         let plugin_engine = tina_plugin::plugin_engine()?;
-        let mut limits = test_runner::plugin_loader::PluginLimits::default();
+        let mut limits = tina_wasm_host::plugin_loader::PluginLimits::default();
         if let Some(timeout_ms) = plugin_call_timeout_ms {
             limits.call_deadline = std::time::Duration::from_millis(timeout_ms);
         }
@@ -370,7 +370,7 @@ async fn async_main() -> Result<()> {
                     Some(runtime) => match tokio::task::spawn_blocking(move || {
                         runtime.on_prompt(
                             &lease,
-                            test_runner::plugin_loader::PluginCallFrame { session_id, model },
+                            tina_wasm_host::plugin_loader::PluginCallFrame { session_id, model },
                         )
                     })
                     .await

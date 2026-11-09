@@ -2,11 +2,11 @@ import 'dart:io';
 
 import 'package:test/test.dart';
 
-import '../../test_runner/testdata/plugin_probe/entity_decode.dart';
+import '../../tina_wasm_host/testdata/plugin_probe/entity_decode.dart';
 
 /// Native side of the entity-decode native/wasm parity proof (issue #85
 /// Phase 3). The same vectors are asserted against the compiled wasm
-/// component by `pkg/test_runner/src/plugin_loader.rs`
+/// component by pkg/tina_wasm_host/src/plugin_loader.rs
 /// (`entity_decode_component_matches_native_parity_vectors`).
 const vectors = <String, String>{
   'a&amp;b': 'a&b',
@@ -30,7 +30,7 @@ void main() {
   // `dart test` may run with the package or the workspace as the working
   // directory, so look one level up as well.
   test('wasm fixture is committed next to the native source', () {
-    const rel = 'test_runner/testdata/plugin_probe/entity_decode.component.wasm';
+    const rel = 'tina_wasm_host/testdata/plugin_probe/entity_decode.component.wasm';
     final cwd = Directory.current.path;
     final root = Directory(cwd).parent.path;
     final found = [

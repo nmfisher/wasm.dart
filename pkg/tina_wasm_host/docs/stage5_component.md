@@ -10,7 +10,7 @@ client that drives the native engine.
 
 ## What landed (wasm.dart, `asb/wasm-stage5-component`)
 
-- `pkg/test_runner/src/main.rs`: optional stdin wiring. `wasi.stdin` is
+- `pkg/tina_wasm_host/src/main.rs`: optional stdin wiring. `wasi.stdin` is
   connected unless `--no-stdin` is passed: a plain thread pumps process
   stdin into a channel (`ChannelReader`) that the guest reads —
   `tokio::io::stdin` could not be used (its reads are bound to the

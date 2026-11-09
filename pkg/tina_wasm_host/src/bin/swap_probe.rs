@@ -27,8 +27,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use test_runner::plugin_loader::{PluginCallFrame, PluginLimits, verify_embedder_abi};
-use test_runner::tina_plugin::{TinaPluginError, TinaPluginRuntime, plugin_engine};
+use tina_wasm_host::plugin_loader::{PluginCallFrame, PluginLimits, verify_embedder_abi};
+use tina_wasm_host::tina_plugin::{TinaPluginError, TinaPluginRuntime, plugin_engine};
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -82,7 +82,7 @@ fn main() {
     let rss_start = rss_bytes();
 
     println!(
-        "{{\"event\":\"identities\",\"test_runner\":\"{}\",\"profile\":\"{}\",\"deadline_ms\":{deadline_ms},\"v1_len\":{},\"v1_fnv64\":\"{:016x}\",\"v2_len\":{},\"v2_fnv64\":\"{:016x}\"}}",
+        "{{\"event\":\"identities\",\"host\":\"{}\",\"profile\":\"{}\",\"deadline_ms\":{deadline_ms},\"v1_len\":{},\"v1_fnv64\":\"{:016x}\",\"v2_len\":{},\"v2_fnv64\":\"{:016x}\"}}",
         env!("CARGO_PKG_VERSION"),
         if cfg!(debug_assertions) { "debug" } else { "release" },
         v1_bytes.len(),

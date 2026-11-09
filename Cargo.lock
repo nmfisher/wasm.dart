@@ -1977,22 +1977,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "test_runner"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "env_logger",
- "futures",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "wasmtime",
- "wasmtime-wasi",
-]
-
-[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2030,6 +2014,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "tina-wasm-host"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "env_logger",
+ "futures",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wasmtime",
+ "wasmtime-wasi",
 ]
 
 [[package]]

@@ -41,14 +41,14 @@ void main() async {
     final cargoBuild = await Process.start('cargo', [
       'build',
       '-p',
-      'test_runner',
+      'tina-wasm-host',
     ], mode: .inheritStdio);
     final exitCode = await cargoBuild.exitCode;
     if (exitCode != 0) throw 'Unexpected exit code from cargo: $exitCode';
 
     final exeSuffix = Platform.isWindows ? '.exe' : '';
     testRunnerExecutable = p.normalize(
-      '../../target/debug/test_runner$exeSuffix',
+      '../../target/debug/tina-wasm-host$exeSuffix',
     );
   });
 

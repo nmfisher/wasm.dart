@@ -2,7 +2,7 @@
 
 Status: implemented on `codex/issue85-loader-current-main` (issue #85).
 This document describes the execution budget model of the per-plugin-Store
-boundary (`pkg/test_runner/src/plugin_loader.rs`, `tina_plugin.rs`) and the
+boundary (`pkg/tina_wasm_host/src/plugin_loader.rs`, `tina_plugin.rs`) and the
 opt-in watched-artifact dev loop.
 
 ## Execution budgets

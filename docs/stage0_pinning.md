@@ -13,7 +13,7 @@ Verified on 2026-11-07 on this container (`/workspace`, branch
 | Embedder surface | 82 external functions in `sdk/lib/_internal/wasm/standalone/embedder.dart` | Byte-identical across `3.13.7` stable, the pinned edge build and `3.14.0-315.3.beta`; **differs** in `3.15.0-118.1.beta` (nullable annotations dropped from `WasmExternRef` params) |
 | wasm.dart (this repo) | branch `asb/wasm-stage0-sdk-pin` @ `e7506b3` | Cut from lineage tip `rebase/dart-imports-sdk314` @ `e7506b3` |
 | wasm.dart upstream | `simolus3/wasm.dart` main @ `29c9ce0` (*"Fix publishing autoation"*, 2026-10-25) | Merge-base of this lineage and upstream main is `de041ee` (*"A few more string functions"*); upstream main carries the same feature work as this fork's PR stack |
-| wasmtime (Rust host) | `47.0.2` (crates.io, `Cargo.lock`) | `pkg/test_runner` — the component host the case suite runs on |
+| wasmtime (Rust host) | `47.0.2` (crates.io, `Cargo.lock`) | `pkg/tina_wasm_host` — the component host the case suite runs on |
 | wasmtime CLI | `47.0.4` (`/home/agent/bin/wasmtime`, 254cb7a02 2026-08-20) | Stock CLI; documented as unable to host `wasm:dart/trace@1.0.0` |
 | wasm-tools CLI | cargo-installed `wasm-tools` at `~/.cargo/bin` | Used for WAT inspection only |
 | runtime helpers | `pkg/runtime_helpers` (Rust, wasm32-unknown-unknown, nightly `-Zbuild-std`) | Prebuilt asset at `pkg/wasm_tools/assets/runtime_helpers.wasm` (gitignored, rebuilt by `tool/build_runtime_helpers.sh`) |
@@ -126,7 +126,7 @@ the DEPS-pinned in-tree 3.1.3.
   merge-base between this lineage and upstream main is `de041ee`; upstream has
   since merged the same feature work (23 commits between `de041ee` and
   `29c9ce0`) that this fork developed in its PR stack.
-- `pkg/test_runner`: Rust reference host, wasmtime `47.0.2` +
+- `pkg/tina_wasm_host`: Rust reference host, wasmtime `47.0.2` +
   `wasmtime-wasi` `47.0.2` per `Cargo.lock`.
 - wasmtime CLI `47.0.4` at `/home/agent/bin/wasmtime` — used for raw-module
   inspection; **cannot host components built by this pipeline** (missing
@@ -177,8 +177,8 @@ dart run wasm_tools compile bin/print_probe.dart \
 #   [FINE] compiler: Patched 547 references
 #   [INFO] compiler: Writing component to /tmp/exit_test/probe.wasm
 
-# 3. Run under wasmtime via the pipeline's reference host (test_runner)
-cd /workspace && ./target/debug/test_runner /tmp/exit_test/probe.wasm
+# 3. Run under wasmtime via the pipeline's reference host (tina-wasm-host)
+cd /workspace && ./target/debug/tina-wasm-host /tmp/exit_test/probe.wasm
 # stderr: Error: Missing tests export   (rc=1)
 #         — print_probe is a plain app, not a wasmdart:tests world component;
 
@@ -216,7 +216,7 @@ dart run wasm_tools compile test/cases/print.dart \
 # [FINE] compiler: Patched 630 references
 # [INFO] compiler: Writing component to /tmp/exit_test/print.wasm   (rc=0)
 
-cd /workspace && ./target/debug/test_runner /tmp/exit_test/print.wasm
+cd /workspace && ./target/debug/tina-wasm-host /tmp/exit_test/print.wasm
 # {"type":"start","test":0}
 # {"type":"bool","value":true}
 # hello from wasm
@@ -233,7 +233,7 @@ export PATH=/home/agent/dart-sdk-src/sdk/out/ReleaseX64/dart-sdk/bin:/home/agent
 ```
 
 1. `pkg/wasm_components` (the case suite; `setUpAll` builds `cargo build -p
-   test_runner`, wasmtime 47.0.2):
+   tina-wasm-host`, wasmtime 47.0.2):
 
    ```
    cd /workspace/pkg/wasm_components && dart test --timeout 5m
