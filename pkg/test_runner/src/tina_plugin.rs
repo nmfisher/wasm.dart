@@ -17,7 +17,7 @@ use std::{
 
 use wasmtime::{Engine, Result};
 
-use test_runner::plugin_loader::{
+use crate::plugin_loader::{
     PluginBoundary, PluginCallFrame, PluginFailure, PluginId, PluginLimits, PluginPolicy,
     PluginServiceBroker, ServiceCallError, ServiceCaller, plugin_engine_config,
 };

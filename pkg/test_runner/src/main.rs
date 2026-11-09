@@ -27,8 +27,9 @@ use wasmtime::{
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p3};
 
 mod tina_http;
-mod tina_plugin;
 mod tina_process;
+
+use test_runner::tina_plugin;
 
 fn main() -> Result<()> {
     // Wasmtime's concurrent (async component model) internals log under the
