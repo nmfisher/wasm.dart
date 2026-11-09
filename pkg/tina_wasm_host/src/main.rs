@@ -43,9 +43,31 @@ fn main() -> Result<()> {
 }
 
 async fn async_main() -> Result<()> {
-    let Some(file) = env::args().nth(1) else {
-        wasmtime::bail!("Usage: cargo run -- file.wasm")
-    };
+    // The engine component: embedded by default (build.rs copies
+    // TINA_WASM_HOST_ENGINE into OUT_DIR for include_bytes!), or loaded
+    // from disk for dev via a positional path or --engine=<path>. Giving
+    // both an external form is an error. Plugin components stay external:
+    // they are the dynamic inputs. A positional path is only honored when
+    // it is not a flag: packaged runs start with --preopen/--env flags and
+    // use the embedded engine.
+    let mut engine_path: Option<String> = None;
+    let mut file: Option<String> = None;
+    let mut flags: Vec<String> = Vec::new();
+    for arg in env::args().skip(1) {
+        if let Some(spec) = arg.strip_prefix("--engine=") {
+            wasmtime::ensure!(engine_path.is_none(), "--engine given more than once");
+            engine_path = Some(spec.to_string());
+        } else if arg.starts_with('-') && arg.len() > 1 {
+            flags.push(arg);
+        } else {
+            wasmtime::ensure!(file.is_none(), "only one positional engine path");
+            file = Some(arg);
+        }
+    }
+    wasmtime::ensure!(
+        engine_path.is_none() || file.is_none(),
+        "pass either a positional engine path or --engine=<path>, not both"
+    );
 
     let mut config = Config::default();
     config.wasm_gc(true);
@@ -77,7 +99,7 @@ async fn async_main() -> Result<()> {
     // from stdin (the case suite's components never do). Stdin is wired
     // unless `--no-stdin` is given, so a case run piped nothing stays
     // unchanged: EOF arrives immediately for components that read.
-    if !env::args().skip(2).any(|arg| arg == "--no-stdin") {
+    if !flags.iter().any(|arg| arg == "--no-stdin") {
         // `tokio::io::stdin` blocks the single-threaded runtime's event
         // loop (its reads are runtime-thread-bound), which stalls every
         // guest - even ones that never read stdin. Instead, a plain
@@ -109,7 +131,7 @@ async fn async_main() -> Result<()> {
     let mut plugin_read_context = false;
     let mut plugin_watch = false;
     let mut plugin_call_timeout_ms: Option<u64> = None;
-    for arg in env::args().skip(2) {
+    for arg in flags {
         if let Some(spec) = arg.strip_prefix("--preopen=") {
             let (guest, host) = spec.split_once('=').ok_or_else(|| {
                 wasmtime::Error::msg(format!("--preopen expects guest_dir=host_dir, got {spec}"))
@@ -145,6 +167,8 @@ async fn async_main() -> Result<()> {
                 wasmtime::bail!("--env expects NAME=VALUE, got {spec}");
             };
             wasi.env(name, value);
+        } else if arg.starts_with("--engine=") {
+            // Consumed by the engine selection above.
         } else {
             wasmtime::bail!("Unknown argument {arg}");
         }
@@ -197,7 +221,25 @@ async fn async_main() -> Result<()> {
         },
     );
 
-    let bytes = fs::read(&file).with_context(|| format!("Reading {file}"))?;
+    // One source wins: --engine=<path>, then the positional engine path,
+    // then the bytes embedded at build time (the packaged default).
+    let bytes = match engine_path {
+        Some(path) => fs::read(&path).with_context(|| format!("Reading {path}"))?,
+        None => match file {
+            Some(file) => fs::read(&file).with_context(|| format!("Reading {file}"))?,
+            None => {
+                let embedded = include_bytes!(concat!(
+                    env!("OUT_DIR"),
+                    "/engine.component.wasm"
+                ));
+                wasmtime::ensure!(
+                    !embedded.is_empty(),
+                    "no engine component embedded in this build; pass --engine=<path> (or a positional path)"
+                );
+                embedded.to_vec()
+            }
+        },
+    };
     let component = Component::new(&engine, bytes)?;
     let Some(run_instance_index) = component.get_export_index(None, "wasmdart:tests/tested-module")
     else {
