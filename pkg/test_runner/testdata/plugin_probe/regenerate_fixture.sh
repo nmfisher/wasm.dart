@@ -41,7 +41,11 @@ fi
 if [[ ! -f "$repo/.dart_tool/package_config.json" || ! -f "$repo/.dart_tool/package_graph.json" ]]; then
   (cd "$repo" && "$sdk/bin/dart" pub get --offline)
 fi
-work=$(mktemp -d /tmp/issue85-plugin-probe.XXXXXX)
+# A fixed scratch path keeps the compiled component byte-reproducible: the
+# component embeds the package's absolute path, so a random mktemp suffix
+# would leak into the artifact. Single-writer: one build at a time.
+work=/tmp/issue85-plugin-probe-build
+rm -rf "$work"
 mkdir -p "$work/package/bin" "$work/package/hook" "$work/package/wit" "$work/package/generated" "$work/package/lib/src/generated" "$work/package/.dart_tool"
 tool_config="$repo/.dart_tool/issue85-tool-package-config.json"
 ln -s "$cargo_target" "$repo/target"
@@ -65,6 +69,10 @@ if [[ ! -f "$plugin_source" ]]; then
   exit 1
 fi
 cp "$plugin_source" "$work/package/bin/plugin_authoring.dart"
+# Sibling Dart sources imported by the plugin source (relative imports).
+for extra in ${ISSUE85_PLUGIN_EXTRA_SOURCES:-}; do
+  cp "$extra" "$work/package/bin/"
+done
 python3 - "$repo/.dart_tool/package_config.json" "$tool_config" "$repo" <<'PY'
 import json, sys
 from pathlib import Path
@@ -119,6 +127,11 @@ cp "$repo/.dart_tool/native_assets.yaml" "$work/package/.dart_tool/native_assets
     --output "$work/plugin.component.wasm" --hooks-include-dev-dependencies \
     "$work/package/bin/plugin_authoring.dart"
 )
-python3 "$fixture/stamp_abi.py" "$work/plugin.component.wasm" "$output"
+# Stamp with the wasm_tools CLI (byte-identical to the former stamp_abi.py).
+(
+  cd "$repo"
+  nice -n10 "$sdk/bin/dart" --packages="$config" run "$repo/pkg/wasm_tools/bin/wasm_tools.dart" stamp-abi \
+    "$work/plugin.component.wasm" --output "$output"
+)
 printf 'scratch: %s\ncomponent: %s\nsha256: ' "$work" "$output"
 sha256sum "$output" | cut -d' ' -f1

@@ -1,17 +1,25 @@
 //! Narrow v0.1.0 component loader used by the plugin boundary proof.
 //!
 //! Every plugin owns a Store. Only host-created proxy resources live in that
-//! Store; service calls carry scalar data through a trusted host broker. This
-//! synchronous probe has no fuel/epoch cancellation, memory budget, or nested
-//! same-Store reentry, so it is not yet a production untrusted-code sandbox.
+//! Store; service calls carry scalar data through a trusted host broker. Every
+//! guest call runs under an epoch deadline (wall-clock CPU budget) and a
+//! Store limiter (linear-memory, table, and instance-count budget), and a
+//! trapped or killed call retires its Store before the error escapes. There
+//! is still no nested same-Store reentry and no fuel accounting, so it is
+//! not yet a full production untrusted-code sandbox.
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    thread::JoinHandle,
+    time::Duration,
 };
 
 use wasmtime::component::types::{ComponentFunc, Type};
 use wasmtime::{
-    Engine, Store,
+    Config, Engine, Store, StoreLimits, StoreLimitsBuilder,
     component::{
         Component, Func, Linker, Resource, ResourceAny, ResourceType, Val, types::ComponentItem,
     },
@@ -78,6 +86,22 @@ pub trait PluginServiceBroker: Send + Sync + 'static {
     ) -> std::result::Result<String, ServiceCallError>;
 }
 
+/// Minimal broker for probes and benchmarks: echoes the request back with
+/// the loader-issued call number. It grants nothing: the boundary's policy
+/// still gates whether the guest may import and call the service at all.
+pub struct EchoBroker;
+
+impl PluginServiceBroker for EchoBroker {
+    fn call(
+        &self,
+        caller: ServiceCaller,
+        request: &str,
+        _frame: Option<&PluginCallFrame>,
+    ) -> std::result::Result<String, ServiceCallError> {
+        Ok(format!("{request};call={}", caller.call_number()))
+    }
+}
+
 /// Host policy. Interface admission and call authority are separate grants.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PluginPolicy {
@@ -99,6 +123,117 @@ pub enum PluginFailure {
     ServiceUnavailable,
 }
 
+/// Wall-clock default for one guest call. The issue sets no numeric budget;
+/// this default only bounds runaway plugins and every value is overridable.
+pub const DEFAULT_CALL_DEADLINE: Duration = Duration::from_secs(10);
+/// Wall-clock default for instantiating a plugin Store (Dart runtime start).
+/// Instantiation is host-initiated on an admitted artifact, so its budget is
+/// generous and separate from the per-call budget.
+pub const DEFAULT_INSTANTIATION_DEADLINE: Duration = Duration::from_secs(60);
+/// Resolution of the engine-epoch ticker. Call deadlines round up to whole
+/// ticks, so this is also the granularity of the kill latency.
+pub const DEFAULT_EPOCH_TICK: Duration = Duration::from_millis(10);
+/// Linear-memory budget per plugin Store. Dart heap objects live in the GC
+/// heap (bounded by the epoch deadline, not by this cap); this limit covers
+/// linear memories, which hold guest shadow stacks and typed-data buffers.
+pub const DEFAULT_MEMORY_LIMIT_BYTES: usize = 256 * 1024 * 1024;
+/// Table-entry budget per plugin Store.
+pub const DEFAULT_TABLE_ELEMENTS: usize = 1_000_000;
+
+/// Execution/resource budgets applied to every plugin Store.
+#[derive(Clone, Copy, Debug)]
+pub struct PluginLimits {
+    /// Wall-clock budget per `describe`/`run` guest call. Exceeding it traps
+    /// the call and retires the Store.
+    pub call_deadline: Duration,
+    /// Wall-clock budget for instantiating a plugin Store (see
+    /// `DEFAULT_INSTANTIATION_DEADLINE`).
+    pub instantiation_deadline: Duration,
+    /// Engine-epoch tick interval; deadline granularity and ticker load.
+    pub epoch_tick: Duration,
+    /// Linear-memory byte cap per Store (see `DEFAULT_MEMORY_LIMIT_BYTES`).
+    pub memory_bytes: usize,
+    /// Table-entry cap per Store.
+    pub table_elements: usize,
+}
+
+impl Default for PluginLimits {
+    fn default() -> Self {
+        Self {
+            call_deadline: DEFAULT_CALL_DEADLINE,
+            instantiation_deadline: DEFAULT_INSTANTIATION_DEADLINE,
+            epoch_tick: DEFAULT_EPOCH_TICK,
+            memory_bytes: DEFAULT_MEMORY_LIMIT_BYTES,
+            table_elements: DEFAULT_TABLE_ELEMENTS,
+        }
+    }
+}
+
+impl PluginLimits {
+    fn ticks_for(&self, deadline: Duration) -> u64 {
+        let tick = self.epoch_tick.as_nanos().max(1);
+        let ticks = u64::try_from(deadline.as_nanos().div_ceil(tick)).unwrap_or(u64::MAX);
+        ticks.max(1)
+    }
+
+    fn call_ticks(&self) -> u64 {
+        self.ticks_for(self.call_deadline)
+    }
+
+    fn instantiation_ticks(&self) -> u64 {
+        self.ticks_for(self.instantiation_deadline)
+    }
+}
+
+/// Wasmtime engine configuration for plugin boundary runtimes: the GC/
+/// function-references/exceptions feature set the Dart toolchain needs, with
+/// epoch interruption enabled so per-call deadlines can interrupt guests.
+pub fn plugin_engine_config() -> Config {
+    let mut config = Config::default();
+    config.wasm_gc(true);
+    config.wasm_function_references(true);
+    config.wasm_exceptions(true);
+    config.epoch_interruption(true);
+    config
+}
+
+/// Drives `Engine::increment_epoch` on a background thread so per-call epoch
+/// deadlines actually fire. Stopped and joined when dropped.
+struct EpochTicker {
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl EpochTicker {
+    fn spawn(engine: &Engine, tick: Duration) -> Result<Self> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let engine = engine.clone();
+        let flag = stop.clone();
+        let worker = std::thread::Builder::new()
+            .name("plugin-epoch-ticker".into())
+            .spawn(move || {
+                while !flag.load(Ordering::Relaxed) {
+                    std::thread::sleep(tick);
+                    engine.increment_epoch();
+                }
+            })
+            .map_err(|error| wasmtime::Error::msg(format!("epoch ticker spawn failed: {error}")))?;
+        Ok(Self {
+            stop,
+            worker: Some(worker),
+        })
+    }
+}
+
+impl Drop for EpochTicker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Proxy {
     owner: PluginId,
@@ -112,6 +247,7 @@ struct PluginStore {
     active_call: Option<u64>,
     active_frame: Option<PluginCallFrame>,
     next_call: u64,
+    limits: StoreLimits,
 }
 
 impl WasiView for PluginStore {
@@ -142,10 +278,25 @@ pub struct PluginBoundary {
     next_generation: u64,
     free_slots: Vec<u64>,
     plugins: HashMap<u64, ActivePlugin>,
+    limits: PluginLimits,
+    #[allow(dead_code)] // dropped last so the ticker outlives all Stores
+    ticker: EpochTicker,
 }
 
 impl PluginBoundary {
     pub fn new(engine: Engine, broker: std::sync::Arc<dyn PluginServiceBroker>) -> Result<Self> {
+        Self::with_limits(engine, broker, PluginLimits::default())
+    }
+
+    pub fn with_limits(
+        engine: Engine,
+        broker: std::sync::Arc<dyn PluginServiceBroker>,
+        limits: PluginLimits,
+    ) -> Result<Self> {
+        // The engine must have been built with `plugin_engine_config()` (or
+        // otherwise enable epoch interruption); wasmtime 47 has no getter, so
+        // the epoch-kill tests guard this contract instead of a runtime check.
+        let ticker = EpochTicker::spawn(&engine, limits.epoch_tick)?;
         let loader_id = NEXT_LOADER_ID
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| wasmtime::Error::msg("plugin loader identity exhausted"))?;
@@ -157,6 +308,8 @@ impl PluginBoundary {
             next_generation: 1,
             free_slots: Vec::new(),
             plugins: HashMap::new(),
+            limits,
+            ticker,
         })
     }
 
@@ -278,8 +431,23 @@ impl PluginBoundary {
                 active_call: None,
                 active_frame: None,
                 next_call: 1,
+                limits: StoreLimitsBuilder::new()
+                    .memory_size(self.limits.memory_bytes)
+                    .table_elements(self.limits.table_elements)
+                    .instances(8)
+                    .memories(8)
+                    .tables(16)
+                    .trap_on_grow_failure(true)
+                    .build(),
             },
         );
+        // The limiter must be installed before instantiation so compile-time
+        // and instantiation-time growth is bounded too, not just guest calls.
+        store.limiter(|data| &mut data.limits);
+        // Epoch deadline starts at zero on a fresh Store, so without arming
+        // it here the first ticker tick would trap instantiation itself.
+        // Instantiation is guest execution; it runs under the same budget.
+        store.set_epoch_deadline(self.limits.instantiation_ticks());
         let proxy = store.data_mut().table.push(Proxy { owner: handle })?;
         let proxy_rep = proxy.rep();
         let proxy = ResourceAny::try_from_resource(proxy, &mut store)?;
@@ -323,8 +491,12 @@ impl PluginBoundary {
     }
 
     pub fn describe(&mut self, handle: PluginId) -> Result<PluginDescriptor> {
+        let ticks = self.limits.call_ticks();
         let call = {
             let plugin = self.active_mut(handle)?;
+            // Wall-clock budget: the epoch ticker advances the engine epoch
+            // while the guest runs; exceeding the deadline traps the call.
+            plugin.store.set_epoch_deadline(ticks);
             let mut results = [Val::Record(Vec::new())];
             plugin
                 .describe
@@ -358,6 +530,7 @@ impl PluginBoundary {
         input: &str,
         frame: Option<PluginCallFrame>,
     ) -> Result<std::result::Result<String, PluginFailure>> {
+        let ticks = self.limits.call_ticks();
         let plugin = self.active_mut(handle)?;
         wasmtime::ensure!(
             plugin.store.data().active_call.is_none(),
@@ -374,6 +547,9 @@ impl PluginBoundary {
             Val::String(input.to_owned()),
         ];
         let mut results = [Val::Result(Ok(None))];
+        // Wall-clock budget: see `describe`. A killed call surfaces here as a
+        // trap and the Store is retired by the shared trap path below.
+        plugin.store.set_epoch_deadline(ticks);
         let call_result = plugin.run.call(&mut plugin.store, &params, &mut results);
         plugin.store.data_mut().active_call = None;
         plugin.store.data_mut().active_frame = None;
@@ -409,6 +585,12 @@ impl PluginBoundary {
         drop(store);
         self.free_slots.push(handle.slot);
         cleanup
+    }
+
+    /// Retune the per-call wall-clock deadline (e.g. a short deadline for
+    /// kill-latency measurement). Applies to calls made after this point.
+    pub fn set_call_deadline(&mut self, deadline: Duration) {
+        self.limits.call_deadline = deadline;
     }
 
     fn active_mut(&mut self, handle: PluginId) -> Result<&mut ActivePlugin> {
@@ -987,9 +1169,9 @@ mod tests {
     }
 
     fn engine() -> Result<Engine> {
-        let mut config = wasmtime::Config::new();
-        config.wasm_component_model(true);
-        Engine::new(&config)
+        // Same configuration production uses, so boundary tests exercise the
+        // epoch-deadline path on every guest call.
+        Engine::new(&plugin_engine_config())
     }
 
     fn allow_call() -> PluginPolicy {
@@ -1250,6 +1432,49 @@ mod tests {
         boundary.retire(survivor)?;
         boundary.retire(replacement)?;
         assert_eq!(broker.calls.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    /// Native-side counterpart: `pkg/wasm_components/test/entity_decode_parity_test.dart`
+    /// asserts the same vectors against the shared pure-Dart implementation.
+    const ENTITY_DECODE_PARITY_VECTORS: &[(&str, &str)] = &[
+        ("a&amp;b", "a&b"),
+        ("&lt;div&gt;", "<div>"),
+        ("&quot;hi&quot;", "\"hi\""),
+        ("&apos;it&apos;s", "'it's"),
+        ("caf\u{e9}&nbsp;x", "caf\u{e9}\u{a0}x"),
+        ("&#65;&#x42;&#x43;", "ABC"),
+        ("&unknown; stays", "&unknown; stays"),
+        ("bare &amp tail", "bare &amp tail"),
+        ("double &amp;amp;", "double &amp;"),
+        ("", ""),
+        ("plain text", "plain text"),
+        ("&#x110000; bad", "&#x110000; bad"),
+        ("a&b", "a&b"),
+    ];
+
+    #[test]
+    fn entity_decode_component_matches_native_parity_vectors() -> Result<()> {
+        let mut boundary = PluginBoundary::new(engine()?, Arc::new(EchoBroker))?;
+        // The generated glue imports engine-service but the plugin never
+        // calls it: the operation grant stays off (call authority is
+        // separate from import admission).
+        let handle = boundary.load(
+            &include_bytes!("../testdata/plugin_probe/entity_decode.component.wasm").to_vec(),
+            PluginPolicy {
+                allow_engine_service_import: true,
+                allow_engine_service_call: false,
+            },
+        )?;
+        let descriptor = boundary.describe(handle)?;
+        assert_eq!(descriptor.id, "example/entity-decode");
+        for (input, expected) in ENTITY_DECODE_PARITY_VECTORS {
+            let result = boundary.run(handle, input)?;
+            match result {
+                Ok(section) => assert_eq!(section, *expected, "input: {input:?}"),
+                other => panic!("entity decode failed for {input:?}: {other:?}"),
+            }
+        }
         Ok(())
     }
 }

@@ -106,6 +106,8 @@ async fn async_main() -> Result<()> {
     let mut preopens: Vec<(String, std::path::PathBuf)> = Vec::new();
     let mut plugin_path: Option<std::path::PathBuf> = None;
     let mut plugin_read_context = false;
+    let mut plugin_watch = false;
+    let mut plugin_call_timeout_ms: Option<u64> = None;
     for arg in env::args().skip(2) {
         if let Some(spec) = arg.strip_prefix("--preopen=") {
             let (guest, host) = spec.split_once('=').ok_or_else(|| {
@@ -129,6 +131,14 @@ async fn async_main() -> Result<()> {
             plugin_path = Some(path.into());
         } else if arg == "--plugin-grant=session.read-context" {
             plugin_read_context = true;
+        } else if arg == "--plugin-watch" {
+            plugin_watch = true;
+        } else if let Some(spec) = arg.strip_prefix("--plugin-call-timeout-ms=") {
+            let value: u64 = spec
+                .parse()
+                .map_err(|_| wasmtime::Error::msg(format!("--plugin-call-timeout-ms expects u64, got {spec}")))?;
+            wasmtime::ensure!(value > 0, "--plugin-call-timeout-ms must be positive");
+            plugin_call_timeout_ms = Some(value);
         } else if let Some(spec) = arg.strip_prefix("--env=") {
             let Some((name, value)) = spec.split_once('=') else {
                 wasmtime::bail!("--env expects NAME=VALUE, got {spec}");
@@ -148,16 +158,29 @@ async fn async_main() -> Result<()> {
         test_runner::plugin_loader::verify_embedder_abi(&bytes)
             .context("plugin embedder ABI preflight")?;
         wasi.env("TINA_WASM_PLUGIN_ID", "tina/wasm-prompt");
-        let mut plugin_config = Config::default();
-        plugin_config.wasm_gc(true);
-        plugin_config.wasm_function_references(true);
-        plugin_config.wasm_exceptions(true);
-        // Plugin exports are synchronous in this ABI. A separate engine
-        // avoids calling sync Store APIs on the async-enabled Tina engine.
-        let plugin_engine = wasmtime::Engine::new(&plugin_config)?;
-        Some(Arc::new(std::sync::Mutex::new(
-            tina_plugin::TinaPluginRuntime::new(plugin_engine, bytes, plugin_read_context)?,
-        )))
+        // Plugin exports are synchronous in this ABI, and the boundary needs
+        // epoch interruption for per-call deadlines. A separate engine avoids
+        // calling sync Store APIs on the async-enabled Tina engine.
+        let plugin_engine = tina_plugin::plugin_engine()?;
+        let mut limits = test_runner::plugin_loader::PluginLimits::default();
+        if let Some(timeout_ms) = plugin_call_timeout_ms {
+            limits.call_deadline = std::time::Duration::from_millis(timeout_ms);
+        }
+        // Prebuilt production default: bytes frozen at startup. `--plugin-watch`
+        // opts into the compile-on-load dev loop (re-read per hook attach).
+        let runtime = if plugin_watch {
+            tina_plugin::TinaPluginRuntime::watching_artifact(
+                plugin_engine,
+                path.clone(),
+                plugin_read_context,
+                limits,
+            )?
+        } else {
+            tina_plugin::TinaPluginRuntime::with_limits(
+                plugin_engine, bytes, plugin_read_context, limits,
+            )?
+        };
+        Some(Arc::new(runtime))
     } else {
         None
     };
@@ -312,11 +335,7 @@ async fn async_main() -> Result<()> {
                 "unexpected plugin open signature"
             );
             results[0] = match &runtime {
-                Some(runtime) => match runtime
-                    .lock()
-                    .map_err(|_| wasmtime::Error::msg("plugin runtime poisoned"))?
-                    .open()
-                {
+                Some(runtime) => match runtime.open() {
                     Ok(lease) => Val::Result(Ok(Some(Box::new(Val::String(lease))))),
                     Err(error) => plugin_error_val(error),
                 },
@@ -348,13 +367,10 @@ async fn async_main() -> Result<()> {
                 let (lease, session_id, model) = parsed?;
                 let output = match runtime {
                     Some(runtime) => match tokio::task::spawn_blocking(move || {
-                        match runtime.lock() {
-                            Ok(mut runtime) => runtime.on_prompt(
-                                &lease,
-                                test_runner::plugin_loader::PluginCallFrame { session_id, model },
-                            ),
-                            Err(_) => Err(tina_plugin::TinaPluginError::Unavailable),
-                        }
+                        runtime.on_prompt(
+                            &lease,
+                            test_runner::plugin_loader::PluginCallFrame { session_id, model },
+                        )
                     })
                     .await
                     {
@@ -379,11 +395,9 @@ async fn async_main() -> Result<()> {
                 wasmtime::bail!("lease is not a string")
             };
             results[0] = match &runtime {
-                Some(runtime) => match runtime
-                    .lock()
-                    .map_err(|_| wasmtime::Error::msg("plugin runtime poisoned"))?
-                    .close(lease)
-                {
+                // close() never blocks on guest code: an active call only
+                // defers the Store retirement to the end of that call.
+                Some(runtime) => match runtime.close(lease) {
                     Ok(()) => Val::Result(Ok(None)),
                     Err(error) => plugin_error_val(error),
                 },
@@ -443,7 +457,9 @@ async fn async_main() -> Result<()> {
 fn plugin_error_val(error: tina_plugin::TinaPluginError) -> Val {
     let (tag, payload) = match error {
         tina_plugin::TinaPluginError::Denied => ("denied", None),
-        tina_plugin::TinaPluginError::Unavailable => ("unavailable", None),
+        tina_plugin::TinaPluginError::Unavailable | tina_plugin::TinaPluginError::Busy => {
+            ("unavailable", None)
+        }
         tina_plugin::TinaPluginError::Failed => ("failed", None),
     };
     Val::Result(Err(Some(Box::new(Val::Variant(tag.to_owned(), payload)))))
