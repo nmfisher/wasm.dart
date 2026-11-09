@@ -2,28 +2,32 @@ use std::{
     env,
     fs,
     io::Write,
+    // `AsyncWrite`'s methods take `Pin<&mut Self>`.
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    // `AsyncWrite`'s methods take `Pin<&mut Self>`.
-    pin::Pin,
     task::{Context, Poll},
 };
 
 use serde::Serialize;
 use serde_json::value::RawValue;
 use wasmtime::{
-    Config, Result, Store, StoreContextMut,
+    Config,
+    Result,
+    Store,
+    StoreContextMut,
+    WasmBacktrace,
     component::{Component, Linker, Val},
     // Only the `with_context` extension is needed; `Context` would collide
     // with `std::task::Context` below.
     error::Context as _,
-    WasmBacktrace,
 };
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p3};
 
 mod tina_http;
+mod tina_plugin;
 mod tina_process;
 
 fn main() -> Result<()> {
@@ -95,11 +99,13 @@ async fn async_main() -> Result<()> {
                 }
             }
         });
-        wasi.stdin(wasmtime_wasi::cli::AsyncStdinStream::new(
-            ChannelReader { receiver: rx },
-        ));
+        wasi.stdin(wasmtime_wasi::cli::AsyncStdinStream::new(ChannelReader {
+            receiver: rx,
+        }));
     }
     let mut preopens: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut plugin_path: Option<std::path::PathBuf> = None;
+    let mut plugin_read_context = false;
     for arg in env::args().skip(2) {
         if let Some(spec) = arg.strip_prefix("--preopen=") {
             let (guest, host) = spec.split_once('=').ok_or_else(|| {
@@ -115,6 +121,14 @@ async fn async_main() -> Result<()> {
             preopens.push((guest.to_string(), host.into()));
         } else if arg == "--no-stdin" {
             // Consumed above.
+        } else if let Some(path) = arg.strip_prefix("--plugin-component=") {
+            wasmtime::ensure!(
+                plugin_path.is_none(),
+                "only one Tina plugin artifact is supported"
+            );
+            plugin_path = Some(path.into());
+        } else if arg == "--plugin-grant=session.read-context" {
+            plugin_read_context = true;
         } else if let Some(spec) = arg.strip_prefix("--env=") {
             let Some((name, value)) = spec.split_once('=') else {
                 wasmtime::bail!("--env expects NAME=VALUE, got {spec}");
@@ -124,6 +138,29 @@ async fn async_main() -> Result<()> {
             wasmtime::bail!("Unknown argument {arg}");
         }
     }
+    wasmtime::ensure!(
+        plugin_path.is_some() || !plugin_read_context,
+        "a plugin grant requires --plugin-component"
+    );
+    let plugin_runtime = if let Some(path) = plugin_path {
+        let bytes = fs::read(&path)
+            .with_context(|| format!("Reading plugin artifact {}", path.display()))?;
+        test_runner::plugin_loader::verify_embedder_abi(&bytes)
+            .context("plugin embedder ABI preflight")?;
+        wasi.env("TINA_WASM_PLUGIN_ID", "tina/wasm-prompt");
+        let mut plugin_config = Config::default();
+        plugin_config.wasm_gc(true);
+        plugin_config.wasm_function_references(true);
+        plugin_config.wasm_exceptions(true);
+        // Plugin exports are synchronous in this ABI. A separate engine
+        // avoids calling sync Store APIs on the async-enabled Tina engine.
+        let plugin_engine = wasmtime::Engine::new(&plugin_config)?;
+        Some(Arc::new(std::sync::Mutex::new(
+            tina_plugin::TinaPluginRuntime::new(plugin_engine, bytes, plugin_read_context)?,
+        )))
+    } else {
+        None
+    };
 
     let mut store = Store::new(
         &engine,
@@ -201,26 +238,29 @@ async fn async_main() -> Result<()> {
     {
         let mut root = linker.root();
         let mut trace = root.instance("wasm:dart/trace@1.0.0")?;
-        trace.func_wrap("capture-utf16", |store: StoreContextMut<'_, HostState>, _capacity: (u32,)| {
-            let backtrace = WasmBacktrace::force_capture(&store);
-            // The top frames are the capture machinery itself (`capture-utf16`
-            // lowering, `tryCaptureStackTrace`, `stackTraceGetCurrent`); the
-            // frames the trace is about sit below them, so drop the top three
-            // like the Dart VM hides its own capture frame.
-            let frames: Vec<String> = backtrace
-                .frames()
-                .iter()
-                .skip(3)
-                .map(render_frame)
-                .collect();
-            let mut text = String::from("Uncaught\n");
-            for frame in frames {
-                text.push_str("    at ");
-                text.push_str(&frame);
-                text.push('\n');
-            }
-            Ok((text,))
-        })?;
+        trace.func_wrap(
+            "capture-utf16",
+            |store: StoreContextMut<'_, HostState>, _capacity: (u32,)| {
+                let backtrace = WasmBacktrace::force_capture(&store);
+                // The top frames are the capture machinery itself (`capture-utf16`
+                // lowering, `tryCaptureStackTrace`, `stackTraceGetCurrent`); the
+                // frames the trace is about sit below them, so drop the top three
+                // like the Dart VM hides its own capture frame.
+                let frames: Vec<String> = backtrace
+                    .frames()
+                    .iter()
+                    .skip(3)
+                    .map(render_frame)
+                    .collect();
+                let mut text = String::from("Uncaught\n");
+                for frame in frames {
+                    text.push_str("    at ");
+                    text.push_str(&frame);
+                    text.push('\n');
+                }
+                Ok((text,))
+            },
+        )?;
     }
     // The `dart:timeline` dependency: every guest timeline event arrives as
     // one canonical call, and the host writes it as one NDJSON line onto
@@ -234,16 +274,8 @@ async fn async_main() -> Result<()> {
         let mut timeline = root.instance("wasm:dart/timeline@1.0.0")?;
         timeline.func_wrap(
             "record-task-event",
-            |_store,
-             params: (
-                u8,
-                i32,
-                i32,
-                String,
-                String,
-            )| {
-                let (event_type, task_id, flow_id, name, arguments_as_json) =
-                    params;
+            |_store, params: (u8, i32, i32, String, String)| {
+                let (event_type, task_id, flow_id, name, arguments_as_json) = params;
                 let line = serde_json::json!({
                     "opt": "timeline",
                     "ty": "timelineEvent",
@@ -269,6 +301,97 @@ async fn async_main() -> Result<()> {
     // the engine behind the `tina:process` access profile. Only
     // components that import `tina:process/process@1.0.0` reach it.
     tina_process::add_to_linker(&mut linker)?;
+    {
+        use wasmtime::component::Val;
+        let mut root = linker.root();
+        let mut session = root.instance("tina:plugin-host/session@0.1.0")?;
+        let runtime = plugin_runtime.clone();
+        session.func_new("open", move |_store, _ty, params, results| {
+            wasmtime::ensure!(
+                params.is_empty() && results.len() == 1,
+                "unexpected plugin open signature"
+            );
+            results[0] = match &runtime {
+                Some(runtime) => match runtime
+                    .lock()
+                    .map_err(|_| wasmtime::Error::msg("plugin runtime poisoned"))?
+                    .open()
+                {
+                    Ok(lease) => Val::Result(Ok(Some(Box::new(Val::String(lease))))),
+                    Err(error) => plugin_error_val(error),
+                },
+                None => plugin_error_val(tina_plugin::TinaPluginError::Unavailable),
+            };
+            Ok(())
+        })?;
+
+        let runtime = plugin_runtime.clone();
+        session.func_new_concurrent("on-prompt", move |_accessor, _ty, params, results| {
+            let parsed = (|| -> Result<(String, String, String)> {
+                wasmtime::ensure!(
+                    params.len() == 3 && results.len() == 1,
+                    "unexpected on-prompt signature"
+                );
+                let Val::String(lease) = &params[0] else {
+                    wasmtime::bail!("lease is not a string")
+                };
+                let Val::String(session_id) = &params[1] else {
+                    wasmtime::bail!("session id is not a string")
+                };
+                let Val::String(model) = &params[2] else {
+                    wasmtime::bail!("model is not a string")
+                };
+                Ok((lease.clone(), session_id.clone(), model.clone()))
+            })();
+            let runtime = runtime.clone();
+            Box::pin(async move {
+                let (lease, session_id, model) = parsed?;
+                let output = match runtime {
+                    Some(runtime) => match tokio::task::spawn_blocking(move || {
+                        match runtime.lock() {
+                            Ok(mut runtime) => runtime.on_prompt(
+                                &lease,
+                                test_runner::plugin_loader::PluginCallFrame { session_id, model },
+                            ),
+                            Err(_) => Err(tina_plugin::TinaPluginError::Unavailable),
+                        }
+                    })
+                    .await
+                    {
+                        Ok(Ok(section)) => Val::Result(Ok(Some(Box::new(Val::String(section))))),
+                        Ok(Err(error)) => plugin_error_val(error),
+                        Err(_) => plugin_error_val(tina_plugin::TinaPluginError::Unavailable),
+                    },
+                    None => plugin_error_val(tina_plugin::TinaPluginError::Unavailable),
+                };
+                results[0] = output;
+                Ok(())
+            })
+        })?;
+
+        let runtime = plugin_runtime.clone();
+        session.func_new("close", move |_store, _ty, params, results| {
+            wasmtime::ensure!(
+                params.len() == 1 && results.len() == 1,
+                "unexpected plugin close signature"
+            );
+            let Val::String(lease) = &params[0] else {
+                wasmtime::bail!("lease is not a string")
+            };
+            results[0] = match &runtime {
+                Some(runtime) => match runtime
+                    .lock()
+                    .map_err(|_| wasmtime::Error::msg("plugin runtime poisoned"))?
+                    .close(lease)
+                {
+                    Ok(()) => Val::Result(Ok(None)),
+                    Err(error) => plugin_error_val(error),
+                },
+                None => plugin_error_val(tina_plugin::TinaPluginError::Unavailable),
+            };
+            Ok(())
+        })?;
+    }
 
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let count = instance.get_func(&mut store, count_test_idx).unwrap();
@@ -315,6 +438,15 @@ async fn async_main() -> Result<()> {
             Ok(())
         })
         .await?
+}
+
+fn plugin_error_val(error: tina_plugin::TinaPluginError) -> Val {
+    let (tag, payload) = match error {
+        tina_plugin::TinaPluginError::Denied => ("denied", None),
+        tina_plugin::TinaPluginError::Unavailable => ("unavailable", None),
+        tina_plugin::TinaPluginError::Failed => ("failed", None),
+    };
+    Val::Result(Err(Some(Box::new(Val::Variant(tag.to_owned(), payload)))))
 }
 
 /// The state the WASI host functions use: the WASI configuration (stdout)
@@ -555,19 +687,10 @@ fn dart_double_json(value: f64) -> String {
         if k == 1 {
             format!("{digits}e{sign}{}", exponent.abs())
         } else {
-            format!(
-                "{}.{}e{sign}{}",
-                &digits[..1],
-                &digits[1..],
-                exponent.abs()
-            )
+            format!("{}.{}e{sign}{}", &digits[..1], &digits[1..], exponent.abs())
         }
     };
-    if negative {
-        format!("-{plain}")
-    } else {
-        plain
-    }
+    if negative { format!("-{plain}") } else { plain }
 }
 
 #[cfg(test)]
