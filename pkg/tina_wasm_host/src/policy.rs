@@ -496,6 +496,36 @@ impl CapabilityPolicy {
         }
     }
 
+    /// Default discovery: boot a working session like native tina with
+    /// zero flags. The current directory is the read-write workspace;
+    /// the user's config tree is preopened read-only (the caller has
+    /// already resolved symlinks and proved `config` exists). Enforcement
+    /// matches the pre-merger behavior: command policy rides the
+    /// guest-carried profile, domains are unrestricted.
+    pub fn from_default_discovery(workspace: &Path, config_dir: &Path) -> Self {
+        CapabilityPolicy {
+            source: PolicySource::Legacy,
+            mode: "default".to_string(),
+            workspace: workspace.display().to_string(),
+            read_dirs: vec![DirEntry {
+                path: config_dir.to_path_buf(),
+                guest: Some("config".to_string()),
+                origin: "default:config".to_string(),
+            }],
+            write_dirs: vec![DirEntry {
+                path: workspace.to_path_buf(),
+                guest: Some(".".to_string()),
+                origin: "default:workspace".to_string(),
+            }],
+            allow_all_domains: true,
+            domains: Vec::new(),
+            default_verdict: Verdict::Ask,
+            rules: Vec::new(),
+            plugins: Vec::new(),
+            protected: Vec::new(),
+        }
+    }
+
     /// The command verdict the host-held policy produces for one command
     /// line. `None` in legacy mode: the caller falls back to the
     /// guest-carried profile, exactly as before the merger.
@@ -643,19 +673,24 @@ impl CapabilityPolicy {
         }
     }
 
-    /// The preopen set the host materializes at instantiation: write grants
-    /// rw, read grants ro, in document order, runtime widenings excluded
-    /// (preopens are fixed at instantiation - a widened directory takes
-    /// effect on the next launch).
+    /// The preopen set the host materializes at instantiation: legacy and
+    /// default-discovery folds keep their given paths (all flag preopens
+    /// rw as yesterday; a discovered config rides the read list ro),
+    /// document mode derives from the grants: write grants rw, read
+    /// grants ro, in document order, runtime widenings excluded (preopens
+    /// are fixed at instantiation - a widened directory takes effect on
+    /// the next launch).
     pub fn preopens(&self) -> Vec<Preopen> {
         if self.source == PolicySource::Legacy {
             return self
                 .write_dirs
                 .iter()
-                .map(|d| Preopen {
+                .map(|d| (d, DirAccess::Write))
+                .chain(self.read_dirs.iter().map(|d| (d, DirAccess::Read)))
+                .map(|(d, access)| Preopen {
                     guest: d.guest.clone().unwrap_or_default(),
                     host: d.path.clone(),
-                    access: DirAccess::Write,
+                    access,
                     origin: d.origin.clone(),
                 })
                 .collect();
@@ -1721,5 +1756,50 @@ mod parity {
             }
             let _ = &expect;
         }
+    }
+}
+
+#[cfg(test)]
+mod default_discovery_tests {
+    use super::*;
+
+    #[test]
+    fn discovery_opens_the_workspace_rw_and_the_config_ro() {
+        let ws = std::env::temp_dir().join(format!("tina-discover-ws-{}", std::process::id()));
+        let cfg = std::env::temp_dir().join(format!("tina-discover-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&cfg).unwrap();
+
+        let policy = CapabilityPolicy::from_default_discovery(&ws, &cfg);
+        assert_eq!(policy.source, PolicySource::Legacy);
+        assert_eq!(policy.mode, "default");
+        let preopens = policy.preopens();
+        assert_eq!(preopens.len(), 2);
+        assert_eq!(preopens[0].guest, ".");
+        assert_eq!(preopens[0].access, DirAccess::Write);
+        assert_eq!(preopens[0].origin, "default:workspace");
+        assert_eq!(preopens[1].guest, "config");
+        assert_eq!(preopens[1].access, DirAccess::Read);
+        assert_eq!(preopens[1].origin, "default:config");
+
+        // Enforcement matches the pre-merger host: commands ride the
+        // guest-carried profile, domains are unrestricted.
+        assert_eq!(policy.evaluate_command("git status"), None);
+        assert!(policy.domain_allowed("https", "anything.example.net", 443));
+
+        std::fs::remove_dir_all(&ws).ok();
+        std::fs::remove_dir_all(&cfg).ok();
+    }
+
+    #[test]
+    fn legacy_fold_gains_no_read_entries_from_discovery() {
+        // The existing legacy fold is untouched: no read dirs, all flags rw.
+        let policy = CapabilityPolicy::from_legacy(
+            vec![(".".to_string(), PathBuf::from("/tmp/ws"))],
+            Vec::new(),
+        );
+        let preopens = policy.preopens();
+        assert_eq!(preopens.len(), 1);
+        assert_eq!(preopens[0].access, DirAccess::Write);
     }
 }
