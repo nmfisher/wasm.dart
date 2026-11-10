@@ -1,0 +1,97 @@
+// The `tina:policy` host interface: the escalation channel of the
+// capability merger (`docs/capability_merger.md`).
+//
+// The engine compiles the capability document and the host enforces it.
+// When an approval flow grants more than one call - an "always" or
+// scoped answer - the engine persists the grant through its own stores
+// and calls `widen` here so the host's live policy covers later calls
+// without re-asking. Entries are validated fail-closed (patterns
+// compile, directories exist, protected paths are never covered); a
+// widened directory is recorded for the engine's gating but cannot add a
+// preopen - those are fixed at instantiation and take effect on the next
+// launch.
+//
+// `snapshot` exposes the effective document (launch entries plus
+// widenings) for diagnostics and parity assertions.
+
+package tina:policy@1.0.0;
+
+interface types {
+    /// How one command rule judges a command line.
+    enum verdict {
+        allow,
+        deny,
+        ask,
+    }
+
+    /// The access class of a directory grant.
+    enum directory-access {
+        read,
+        write,
+    }
+
+    /// One directory grant: a canonical host path. Runtime widenings have
+    /// no preopen (those are fixed at instantiation).
+    record directory-entry {
+        path: string,
+        access: directory-access,
+        origin: string,
+    }
+
+    /// One allowed network domain: `host`, `host:port`, or `*.suffix`.
+    record domain-entry {
+        domain: string,
+        origin: string,
+    }
+
+    /// One command rule, anchored like tina_mode's patterns.
+    record command-rule {
+        pattern: string,
+        verdict: verdict,
+        origin: string,
+    }
+
+    /// Grants for one plugin id.
+    record plugin-entry {
+        plugin: string,
+        grants: list<string>,
+        origin: string,
+    }
+
+    /// One widening or launch entry.
+    variant capability-entry {
+        directory(directory-entry),
+        domain(domain-entry),
+        command(command-rule),
+        plugin(plugin-entry),
+        protected(string),
+    }
+
+    /// The effective document: launch mode, every entry (launch plus
+    /// widenings), and the protected paths.
+    record capability-document {
+        mode: string,
+        entries: list<capability-entry>,
+        protected-paths: list<string>,
+    }
+}
+
+interface policy {
+    use types.{capability-entry, capability-document};
+
+    /// Widen the live policy with one entry after an approved escalation.
+    /// Validated fail-closed; the error carries the refusal. The engine
+    /// persists the grant itself - the host's widening is memory for this
+    /// run only.
+    widen: async func(entry: capability-entry) -> result<_, string>;
+
+    /// The effective document for diagnostics and parity assertions.
+    snapshot: func() -> capability-document;
+}
+
+/// The host-side world used to generate the Rust bindings. Like the other
+/// tina imports, it holds only the custom interface; WASI is linked
+/// separately through `wasmtime_wasi::p3::add_to_linker`.
+world tina-policy-host {
+    import policy;
+}
