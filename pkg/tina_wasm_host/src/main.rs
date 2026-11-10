@@ -288,6 +288,7 @@ async fn async_main() -> Result<()> {
             preopens,
             process: tina_process::ProcessHost::default(),
             policy,
+            http_approvals: tina_http::HttpApprovals::default(),
         },
     );
 
@@ -590,6 +591,8 @@ struct HostState {
     preopens: Vec<(String, std::path::PathBuf)>,
     process: tina_process::ProcessHost,
     policy: policy::CapabilityPolicy,
+    /// Parked domain approvals for `tina:http`'s `respond`.
+    http_approvals: tina_http::HttpApprovals,
 }
 
 impl HostState {
@@ -609,6 +612,7 @@ impl HostState {
             preopens: Vec::new(),
             process: tina_process::ProcessHost::default(),
             policy: policy::CapabilityPolicy::from_legacy(Vec::new(), Vec::new()),
+            http_approvals: tina_http::HttpApprovals::default(),
         }
     }
 }
