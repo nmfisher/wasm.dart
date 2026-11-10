@@ -34,10 +34,19 @@ implementation.
 
 ```
 tina-wasm-host file.wasm [--preopen=guest_dir=host_dir]... [--env=NAME=VALUE]...
+tina-wasm-host file.wasm --capabilities=doc.json [--env=NAME=VALUE]...
 ```
 
 `--preopen` exposes a host directory inside the guest as a WASI preopen
-(read-write); `--env` sets a WASI environment variable. The case suite
+(read-write); `--env` sets a WASI environment variable.
+`--capabilities` replaces the flag surface with the engine's compiled
+capability document (see `docs/capability_merger.md`): the host
+validates it fail-closed, derives the preopen set from its directory
+grants (write grants rw, read grants ro), enforces its command rules at
+`tina:process`, its network domain allowlist at `tina:http`, its plugin
+grants at plugin admission, and accepts `tina:policy.widen` escalations
+from the engine. Without it, the legacy flags fold into a policy with
+the pre-merger behavior. The case suite
 passes neither, so its runs are unchanged; the tina probes use them for
 their workspace and provider configuration (credentials always arrive
 through `--env` from the caller's environment, never from a file).
