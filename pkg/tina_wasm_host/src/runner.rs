@@ -29,6 +29,55 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiVie
 use crate::policy;
 use crate::tina_plugin;
 
+
+/// Builds the config mount for default discovery: a fresh directory
+/// whose `config` entry is a REAL regular file - the resolved contents
+/// of `<home>/.tina/config` - so the mount is exactly stage-5-shaped
+/// (`--preopen=config=<directory-containing-config>`, verified to boot
+/// to ready on every platform). The user's real `~/.tina` tree is never
+/// mounted: symlinks, special files, and the rest of the tree cannot
+/// reach the guest's config reader, and the read-only requirement holds
+/// by construction (the snapshot is never written). The snapshot lives
+/// in the OS temp dir for the process lifetime; it is one small file.
+/// Errors carry the friendly no-config message.
+pub fn discover_config_mount(home: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let config_file = home.join(".tina").join("config");
+    let friendly = || {
+        format!(
+            "no tina config found at {} - run tina once to create one, or pass --preopen=config=<dir>",
+            config_file.display()
+        )
+    };
+    let meta = std::fs::metadata(&config_file).map_err(|_| friendly())?;
+    if !meta.is_file() {
+        return Err(friendly());
+    }
+    let source = std::fs::canonicalize(&config_file)
+        .map_err(|e| format!("could not resolve {}: {e}", config_file.display()))?;
+    static NEXT_MOUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mount = std::env::temp_dir().join(format!(
+        "tina-config-{}-{}",
+        std::process::id(),
+        NEXT_MOUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    // Recreate deterministically: a stale snapshot from a previous run of
+    // the same pid must not shadow the current config.
+    let _ = std::fs::remove_dir_all(&mount);
+    std::fs::create_dir_all(&mount)
+        .map_err(|e| format!("could not create the config snapshot {}: {e}", mount.display()))?;
+    std::fs::copy(&source, mount.join("config"))
+        .map_err(|e| format!("could not snapshot {}: {e}", source.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(
+            mount.join("config"),
+            std::fs::Permissions::from_mode(0o600),
+        );
+    }
+    Ok(mount)
+}
+
 /// The session flags both entry points accept: the capability document,
 /// legacy preopens/env, and the plugin surface. There is no engine
 /// selection: the packaged host runs the engine compiled into it, and
@@ -203,18 +252,9 @@ pub async fn run_guest(component_bytes: Vec<u8>, flags: GuestFlags) -> Result<()
                 .map_err(|e| wasmtime::Error::msg(format!("could not resolve the workspace: {e}")))?;
             let home = std::env::var("HOME")
                 .map_err(|_| wasmtime::Error::msg("no HOME set; pass --preopen=config=<dir>".to_string()))?;
-            let config_file = std::path::PathBuf::from(home).join(".tina").join("config");
-            let resolved = std::fs::canonicalize(&config_file).map_err(|_| {
-                wasmtime::Error::msg(format!(
-                    "no tina config found at {} - run tina once to create one, or pass --preopen=config=<dir>",
-                    config_file.display()
-                ))
-            })?;
-            let config_dir = resolved
-                .parent()
-                .map(|p| p.to_path_buf())
-                .ok_or_else(|| wasmtime::Error::msg("the config file has no parent directory"))?;
-            policy::CapabilityPolicy::from_default_discovery(&workspace, &config_dir)
+            let mount = discover_config_mount(std::path::Path::new(&home))
+                .map_err(wasmtime::Error::msg)?;
+            policy::CapabilityPolicy::from_default_discovery(&workspace, &mount)
         }
     };
     for preopen in policy.preopens() {
@@ -934,5 +974,85 @@ mod tests {
         assert_eq!(dart_double_json(f64::NAN), "null");
         assert_eq!(dart_double_json(f64::INFINITY), "null");
         assert_eq!(dart_double_json(f64::NEG_INFINITY), "null");
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::discover_config_mount;
+
+    fn fixture(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tina-discover-{}-{}",
+            label,
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        dir
+    }
+
+    #[test]
+    fn the_mount_is_a_stage5_shaped_snapshot_of_a_real_config() {
+        let home = fixture("real");
+        std::fs::create_dir_all(home.join(".tina")).unwrap();
+        std::fs::write(home.join(".tina").join("config"), "version = 1\n").unwrap();
+
+        let mount = discover_config_mount(&home).expect("a real config resolves");
+        let mounted = std::fs::read_to_string(mount.join("config")).expect("mounted config");
+        assert_eq!(mounted, "version = 1\n");
+        assert!(
+            std::fs::metadata(&mount).unwrap().is_dir(),
+            "the mount is a directory containing a real config file"
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_symlinked_config_snapshots_the_resolved_file() {
+        // The dotfile-manager layout: ~/.tina/config -> elsewhere/tina.conf.
+        // The snapshot takes the RESOLVED contents, so the guest's
+        // config/config lookup works without following symlinks inside
+        // the mount (the macOS-class init trap).
+        let home = fixture("symlink");
+        let elsewhere = fixture("elsewhere");
+        std::fs::create_dir_all(home.join(".tina")).unwrap();
+        std::fs::write(elsewhere.join("tina.conf"), "version = 2\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            elsewhere.join("tina.conf"),
+            home.join(".tina").join("config"),
+        )
+        .unwrap();
+
+        let mount = discover_config_mount(&home).expect("a symlinked config resolves");
+        let mounted = std::fs::read_to_string(mount.join("config")).expect("mounted config");
+        assert_eq!(mounted, "version = 2\n", "the resolved contents are mounted");
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::remove_dir_all(&elsewhere).ok();
+    }
+
+    #[test]
+    fn missing_config_carries_the_friendly_message() {
+        let home = fixture("missing");
+        let error = discover_config_mount(&home).expect_err("no config is an error");
+        assert!(
+            error.contains(&format!(
+                "no tina config found at {}",
+                home.join(".tina").join("config").display()
+            )),
+            "error: {error}"
+        );
+        assert!(error.contains("run tina once to create one"));
+        assert!(error.contains("--preopen=config=<dir>"));
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_directory_where_the_config_belongs_is_not_a_config() {
+        let home = fixture("dirconfig");
+        std::fs::create_dir_all(home.join(".tina").join("config")).unwrap();
+        let error = discover_config_mount(&home).expect_err("a directory is not a config");
+        assert!(error.contains("no tina config found at"), "error: {error}");
+        std::fs::remove_dir_all(&home).ok();
     }
 }
