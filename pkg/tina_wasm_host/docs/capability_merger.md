@@ -337,12 +337,22 @@ whenever the engine component is newer than the binary, into their own
 scratch target, never over a packaged binary.
 
 Bare invocation boots a working session like native tina (default
-discovery): the current directory is the read-write workspace, the
-user's `~/.tina/config` is preopened read-only (symlinks resolved); with
-no tina config the host fails with a friendly message naming the path
+discovery): the current directory is the read-write workspace, and the
+config mount is a fresh **stage-5-shaped snapshot** - a directory
+containing a real `config` file built from the resolved contents of the
+user's `~/.tina/config`, preopened read-only. The user's real `~/.tina`
+tree is never mounted (a symlinked or unusual config entry cannot reach
+the guest's config reader - the macOS init trap), so the lookup resolves
+exactly like the verified `--preopen=config=<directory-containing-config>`
+flow; read-only holds by construction (the snapshot is never written; it
+is one small file in the OS temp dir for the process lifetime). With no
+tina config the host fails with a friendly message naming the path
 (`run tina once to create one, or pass --preopen=config=<dir>`). The
 discovered policy is the legacy fold (`policy.rs`
 `from_default_discovery`): command policy rides the guest-carried
 profile, domains unrestricted - enforcement semantics unchanged, only
 the preopen defaults are new. Every existing flag still works and fills
-in only what is missing.
+in only what is missing. Regression-tested by
+`tests/discovery_boot.rs` (boots the real embedded binary against a
+home fixture - regular and symlinked config - asserting ready, and the
+friendly no-config error; skips without `TINA_DISCOVERY_RUNNER`).
