@@ -1,0 +1,266 @@
+{
+  "version": 1,
+  "comment": "The parity table for the capability merger (docs/engine2-capability-merger.md section 8). One file, committed byte-identical on both branches: the tina side compiles each row's inputs and asserts the native route; the wasm.dart host compiles the same inputs and asserts the enforcement verdict. expect.host is what the Rust host decides; expect.route is what the engine's mode table decides; both sides must agree with their own column for every row.",
+  "rows": [
+    {
+      "id": "write-inside-ask",
+      "mode": "ask",
+      "read": [],
+      "write": [],
+      "operation": {
+        "kind": "guest-write",
+        "guest-path": "file.txt"
+      },
+      "expect": {
+        "preopen": "rw",
+        "route": "human",
+        "host-verdict": "allow-structural"
+      }
+    },
+    {
+      "id": "write-inside-allow-edits",
+      "mode": "allow-edits",
+      "read": [],
+      "write": [],
+      "operation": {
+        "kind": "guest-write",
+        "guest-path": "file.txt"
+      },
+      "expect": {
+        "preopen": "rw",
+        "route": "allow",
+        "host-verdict": "allow-structural"
+      }
+    },
+    {
+      "id": "write-inside-read-only",
+      "mode": "read-only",
+      "read": [],
+      "write": [],
+      "operation": {
+        "kind": "guest-write",
+        "guest-path": "file.txt"
+      },
+      "expect": {
+        "preopen": "ro",
+        "route": "deny",
+        "host-verdict": "deny-structural"
+      }
+    },
+    {
+      "id": "write-inside-yolo",
+      "mode": "yolo",
+      "read": [],
+      "write": [],
+      "operation": {
+        "kind": "guest-write",
+        "guest-path": "file.txt"
+      },
+      "expect": {
+        "preopen": "rw",
+        "route": "allow",
+        "host-verdict": "allow-structural"
+      }
+    },
+    {
+      "id": "write-outside-workspace",
+      "mode": "allow-edits",
+      "read": [],
+      "write": [],
+      "operation": {
+        "kind": "guest-write",
+        "guest-path": "/etc/outside.txt"
+      },
+      "expect": {
+        "preopen": null,
+        "route": "human",
+        "host-verdict": "deny-structural",
+        "note": "the mode table routes non-workspace writes to the human on both sites; the structural wall denies the operation after - outcome-level parity"
+      }
+    },
+    {
+      "id": "domain-allowed-provider",
+      "mode": "ask",
+      "read": [],
+      "write": [],
+      "domains": [
+        {
+          "domain": "api.anthropic.com",
+          "origin": "provider:anthropic"
+        }
+      ],
+      "operation": {
+        "kind": "domain",
+        "scheme": "https",
+        "host": "api.anthropic.com",
+        "port": 443
+      },
+      "expect": {
+        "route": "allow",
+        "host-verdict": "allow"
+      }
+    },
+    {
+      "id": "domain-denied-unknown",
+      "mode": "ask",
+      "read": [],
+      "write": [],
+      "domains": [
+        {
+          "domain": "api.anthropic.com",
+          "origin": "provider:anthropic"
+        }
+      ],
+      "operation": {
+        "kind": "domain",
+        "scheme": "https",
+        "host": "telemetry.example.net",
+        "port": 443
+      },
+      "expect": {
+        "route": "human",
+        "host-verdict": "ask"
+      }
+    },
+    {
+      "id": "command-allowed-by-grant",
+      "mode": "ask",
+      "read": [],
+      "write": [],
+      "rules": [
+        {
+          "pattern": "git status",
+          "verdict": "allow",
+          "origin": "grant:git-status-1"
+        }
+      ],
+      "operation": {
+        "kind": "command",
+        "command-line": "git status"
+      },
+      "expect": {
+        "route": "allow",
+        "host-verdict": "allow"
+      }
+    },
+    {
+      "id": "command-denied-by-grant",
+      "mode": "ask",
+      "read": [],
+      "write": [],
+      "rules": [
+        {
+          "pattern": "git status",
+          "verdict": "allow",
+          "origin": "grant:git-status-1"
+        },
+        {
+          "pattern": "rm .*",
+          "verdict": "deny",
+          "origin": "grant:rm-deny-1"
+        }
+      ],
+      "operation": {
+        "kind": "command",
+        "command-line": "rm -rf tmp"
+      },
+      "expect": {
+        "route": "deny",
+        "host-verdict": "deny",
+        "reason-fragment": "denies the command"
+      }
+    },
+    {
+      "id": "command-unknown-asks",
+      "mode": "ask",
+      "read": [],
+      "write": [],
+      "rules": [
+        {
+          "pattern": "git status",
+          "verdict": "allow",
+          "origin": "grant:git-status-1"
+        }
+      ],
+      "operation": {
+        "kind": "command",
+        "command-line": "cargo build"
+      },
+      "expect": {
+        "route": "human",
+        "host-verdict": "ask",
+        "reason-fragment": "no rule matched"
+      }
+    },
+    {
+      "id": "escalation-command-approved",
+      "mode": "ask",
+      "read": [],
+      "write": [],
+      "rules": [
+        {
+          "pattern": "git status",
+          "verdict": "allow",
+          "origin": "grant:git-status-1"
+        }
+      ],
+      "operation": {
+        "kind": "command",
+        "command-line": "cargo build"
+      },
+      "escalation": {
+        "kind": "command",
+        "pattern": "cargo .*",
+        "verdict": "allow"
+      },
+      "expect": {
+        "route": "allow",
+        "host-verdict": "allow-after-widen"
+      }
+    },
+    {
+      "id": "escalation-command-denied",
+      "mode": "ask",
+      "read": [],
+      "write": [],
+      "rules": [
+        {
+          "pattern": "git status",
+          "verdict": "allow",
+          "origin": "grant:git-status-1"
+        }
+      ],
+      "operation": {
+        "kind": "command",
+        "command-line": "cargo build"
+      },
+      "escalation-denied": true,
+      "expect": {
+        "route": "human",
+        "host-verdict": "ask-after-deny"
+      }
+    },
+    {
+      "id": "always-allow-persists",
+      "mode": "ask",
+      "read": [],
+      "write": [],
+      "rules": [],
+      "operation": {
+        "kind": "command",
+        "command-line": "cargo build"
+      },
+      "escalation": {
+        "kind": "command",
+        "pattern": "cargo .*",
+        "verdict": "allow",
+        "persist": true
+      },
+      "expect": {
+        "route": "allow",
+        "host-verdict": "allow-after-widen",
+        "persisted-origin": "grant:cargo-always-1"
+      }
+    }
+  ]
+}

@@ -1445,3 +1445,281 @@ mod tests {
         assert!(snapshot.contains("\"origin\":\"escalation\""));
     }
 }
+
+#[cfg(test)]
+mod parity {
+    //! The wasm.dart column of the parity table
+    //! (`testdata/parity-scenarios.json` - the same bytes the tina side
+    //! runs). Every row compiles into a policy here and the host verdict
+    //! must equal the expectation the tina side asserts for its route.
+
+    use super::*;
+    use serde_json::Value;
+
+    fn table() -> Vec<Value> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/testdata/parity-scenarios.json"
+        );
+        let value: Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("parity table"))
+                .expect("parity table is valid JSON");
+        value["rows"].as_array().expect("rows").clone()
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tina-parity-{}-{}",
+            label,
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn compile(row: &Value) -> CapabilityPolicy {
+        let ws = temp_dir("ws");
+        let cfg = temp_dir("cfg");
+        let ws_canonical = std::fs::canonicalize(&ws).unwrap().display().to_string();
+        let cfg_canonical = std::fs::canonicalize(&cfg).unwrap().display().to_string();
+        let read_only = row["mode"] == "read-only";
+        let rules: Vec<String> = row["rules"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .map(|r| {
+                        format!(
+                            r#"{{"pattern": {}, "verdict": {}, "origin": {}}}"#,
+                            r["pattern"], r["verdict"], r["origin"]
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let domains: Vec<String> = row["domains"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .map(|d| format!(r#"{{"domain": {}, "origin": {}}}"#, d["domain"], d["origin"]))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // The structural entries exactly as the engine compiler derives
+        // them: the workspace is the write root, except in read-only mode
+        // where it opens ro from the read list.
+        let workspace_entry =
+            format!(r#"{{"path": "{ws_canonical}", "guest": ".", "origin": "structural:workspace"}}"#);
+        let config_entry =
+            format!(r#"{{"path": "{cfg_canonical}", "guest": "config", "origin": "structural:config"}}"#);
+        let read_list = if read_only {
+            workspace_entry.clone()
+        } else {
+            String::new()
+        };
+        let mut write_list = Vec::new();
+        if !read_only {
+            write_list.push(workspace_entry);
+        }
+        write_list.push(config_entry);
+        // The declared preopens follow the derivation's order: writes
+        // first, then reads.
+        let mut preopens = Vec::new();
+        if !read_only {
+            preopens.push(format!(
+                r#"{{"guest": ".", "host": "{}", "access": "rw", "origin": "structural:workspace"}}"#,
+                ws_canonical
+            ));
+        }
+        preopens.push(format!(
+            r#"{{"guest": "config", "host": "{}", "access": "rw", "origin": "structural:config"}}"#,
+            cfg_canonical
+        ));
+        if read_only {
+            preopens.push(format!(
+                r#"{{"guest": ".", "host": "{}", "access": "ro", "origin": "structural:workspace"}}"#,
+                ws_canonical
+            ));
+        }
+        let json = format!(
+            r#"{{
+                "version": 1,
+                "mode": "{}",
+                "workspace": "{ws_canonical}",
+                "directories": {{
+                    "read": [{}],
+                    "write": [{}]
+                }},
+                "network": {{
+                    "allow_all": {},
+                    "domains": [{}]
+                }},
+                "commands": {{
+                    "default_verdict": "ask",
+                    "rules": [{}]
+                }},
+                "plugins": {{"grants": []}},
+                "protected_paths": [],
+                "preopens": [{}]
+            }}"#,
+            row["mode"].as_str().unwrap(),
+            read_list,
+            write_list.join(","),
+            row["mode"] == "yolo",
+            domains.join(","),
+            rules.join(","),
+            preopens.join(","),
+        );
+        CapabilityPolicy::from_document_json(&json).expect("row compiles")
+    }
+
+    /// The preopen covering a guest path, mirroring the Dart runner.
+    fn covering(policy: &CapabilityPolicy, path: &str) -> Option<DirAccess> {
+        if path.contains("..") {
+            return None;
+        }
+        if !path.starts_with('/') {
+            for preopen in policy.preopens() {
+                if preopen.guest.starts_with('/') {
+                    continue;
+                }
+                if preopen.guest == "."
+                    || path == preopen.guest
+                    || path.starts_with(&format!("{}/", preopen.guest))
+                {
+                    return Some(preopen.access);
+                }
+            }
+            return None;
+        }
+        policy
+            .preopens()
+            .into_iter()
+            .find(|p| p.guest.starts_with('/') && path.starts_with(&p.guest))
+            .map(|p| p.access)
+    }
+
+    #[test]
+    fn parity_rows_hold_on_the_host_side() {
+        for row in table() {
+            let id = row["id"].as_str().unwrap().to_string();
+            let expect = &row["expect"];
+            let operation = &row["operation"];
+            let policy = compile(&row);
+            match operation["kind"].as_str().unwrap() {
+                "guest-write" => {
+                    let covering = covering(&policy, operation["guest-path"].as_str().unwrap());
+                    match expect["host-verdict"].as_str().unwrap() {
+                        "deny-structural" => assert!(
+                            covering != Some(DirAccess::Write),
+                            "{id}: the guest cannot write there"
+                        ),
+                        other => assert_eq!(
+                            covering,
+                            Some(DirAccess::Write),
+                            "{id}: an rw preopen covers the write ({other})"
+                        ),
+                    }
+                }
+                "domain" => {
+                    let allowed = policy.domain_allowed(
+                        operation["scheme"].as_str().unwrap(),
+                        operation["host"].as_str().unwrap(),
+                        operation["port"].as_u64().unwrap() as u16,
+                    );
+                    assert_eq!(
+                        allowed,
+                        expect["host-verdict"] == "allow",
+                        "{id}: the host domain verdict"
+                    );
+                }
+                "command" => {
+                    let line = operation["command-line"].as_str().unwrap();
+                    if let Some(escalation) = row.get("escalation") {
+                        // An approved escalation widens the live policy
+                        // (an appended rule, never an override).
+                        let mut widened = compile(&row);
+                        widened
+                            .widen(CapabilityEntry::Command {
+                                pattern: escalation["pattern"].as_str().unwrap().to_string(),
+                                verdict: match escalation["verdict"].as_str().unwrap() {
+                                    "allow" => Verdict::Allow,
+                                    "deny" => Verdict::Deny,
+                                    _ => Verdict::Ask,
+                                },
+                            })
+                            .expect("the escalation rule widens");
+                        let decision = widened.evaluate_command(line).expect("document mode");
+                        let want = expect["host-verdict"] == "allow-after-widen";
+                        assert_eq!(
+                            matches!(decision, Decision::Allow),
+                            want,
+                            "{id}: after an approved escalation"
+                        );
+                        if let Some(origin) = expect.get("persisted-origin") {
+                            // In-session, widen stamps the escalation
+                            // origin. The PERSISTED grant the engine
+                            // stores under its real id only appears when
+                            // the next launch recompiles the document
+                            // from the stores - compile exactly that.
+                            assert_eq!(
+                                widened.rules.last().unwrap().origin,
+                                "escalation",
+                                "{id}: the in-session widening is traced"
+                            );
+                            let mut recompiled = row.clone();
+                            recompiled["rules"] = serde_json::json!([
+                                {
+                                    "pattern": escalation["pattern"],
+                                    "verdict": escalation["verdict"],
+                                    "origin": origin,
+                                }
+                            ]);
+                            let relaunched = compile(&recompiled);
+                            let decision = relaunched
+                                .evaluate_command(line)
+                                .expect("document mode");
+                            assert!(
+                                matches!(decision, Decision::Allow),
+                                "{id}: the persisted grant answers without asking"
+                            );
+                            assert_eq!(
+                                relaunched.rules.last().unwrap().origin,
+                                origin.as_str().unwrap(),
+                                "{id}: the persisted grant keeps its origin"
+                            );
+                        }
+                    } else if row.get("escalation-denied") == Some(&Value::Bool(true)) {
+                        // A denied escalation widens nothing: re-ask.
+                        let decision = policy.evaluate_command(line).expect("document mode");
+                        assert!(
+                            matches!(decision, Decision::Ask { .. }),
+                            "{id}: a denied escalation changes nothing"
+                        );
+                    } else {
+                        let decision = policy.evaluate_command(line).expect("document mode");
+                        let want = expect["host-verdict"].as_str().unwrap();
+                        match (want, &decision) {
+                            ("allow", Decision::Allow) => {}
+                            ("deny", Decision::Denied { .. }) => {}
+                            ("ask", Decision::Ask { .. }) => {}
+                            other => panic!("{id}: expected {want}, got {:?}", other.1),
+                        }
+                        if let Some(fragment) = expect.get("reason-fragment") {
+                            let reason = match &decision {
+                                Decision::Ask { reason } => reason.clone(),
+                                Decision::Denied { reason } => reason.clone(),
+                                Decision::Allow => String::new(),
+                            };
+                            assert!(
+                                reason.contains(fragment.as_str().unwrap()),
+                                "{id}: the reason contract ({reason})"
+                            );
+                        }
+                    }
+                }
+                other => panic!("{id}: unknown operation kind {other}"),
+            }
+            let _ = &expect;
+        }
+    }
+}
