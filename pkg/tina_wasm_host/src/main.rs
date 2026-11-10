@@ -26,6 +26,7 @@ use wasmtime::{
 };
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p3};
 
+mod policy;
 mod tina_http;
 mod tina_process;
 
@@ -93,6 +94,13 @@ async fn async_main() -> Result<()> {
     // variable. The case suite passes neither, so its runs are unchanged.
     // The preopen map is also what `tina:process` resolves spawn working
     // directories against (see `docs/tina_process.md`).
+    //
+    // `--capabilities=<path>` replaces the flag surface with the engine's
+    // compiled capability document (see `docs/capability_merger.md`): the
+    // host validates it fail-closed and derives the preopen set from its
+    // directory grants (write grants rw, read grants ro). Without it the
+    // legacy flags fold into a policy that behaves exactly like the
+    // pre-merger host.
     let mut wasi = WasiCtxBuilder::new();
     wasi.stdout(stdout.clone());
     // The tina engine's `--pipes` protocol reads its driving requests
@@ -126,7 +134,8 @@ async fn async_main() -> Result<()> {
             receiver: rx,
         }));
     }
-    let mut preopens: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut flag_preopens: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut capabilities_path: Option<String> = None;
     let mut plugin_path: Option<std::path::PathBuf> = None;
     let mut plugin_read_context = false;
     let mut plugin_watch = false;
@@ -136,16 +145,17 @@ async fn async_main() -> Result<()> {
             let (guest, host) = spec.split_once('=').ok_or_else(|| {
                 wasmtime::Error::msg(format!("--preopen expects guest_dir=host_dir, got {spec}"))
             })?;
-            wasi.preopened_dir(
-                host,
-                guest,
-                wasmtime_wasi::DirPerms::all(),
-                wasmtime_wasi::FilePerms::all(),
-            )
-            .map_err(|e| wasmtime::Error::msg(format!("preopening {host} as {guest}: {e}")))?;
-            preopens.push((guest.to_string(), host.into()));
+            // Not preopened here: the policy decides the perms (legacy
+            // folds are rw, documents derive rw/ro from the grants).
+            flag_preopens.push((guest.to_string(), host.into()));
         } else if arg == "--no-stdin" {
             // Consumed above.
+        } else if let Some(spec) = arg.strip_prefix("--capabilities=") {
+            wasmtime::ensure!(
+                capabilities_path.is_none(),
+                "--capabilities given more than once"
+            );
+            capabilities_path = Some(spec.to_string());
         } else if let Some(path) = arg.strip_prefix("--plugin-component=") {
             wasmtime::ensure!(
                 plugin_path.is_none(),
@@ -173,8 +183,51 @@ async fn async_main() -> Result<()> {
             wasmtime::bail!("Unknown argument {arg}");
         }
     }
+    // The capability policy this run enforces: the engine's compiled
+    // document when given, otherwise yesterday's flags folded into the
+    // pre-merger behavior. The WASI preopen set is derived from it: write
+    // grants open rw, read grants open read-only.
+    let plugin_grants: Vec<(String, Vec<String>)> = if plugin_read_context {
+        vec![("tina/wasm-prompt".to_string(), vec!["session.read-context".to_string()])]
+    } else {
+        Vec::new()
+    };
+    let policy = match &capabilities_path {
+        Some(path) => {
+            let text = fs::read_to_string(path)
+                .with_context(|| format!("Reading capability document {path}"))?;
+            policy::CapabilityPolicy::from_document_json(&text)
+                .map_err(wasmtime::Error::msg)?
+        }
+        None => policy::CapabilityPolicy::from_legacy(flag_preopens.clone(), plugin_grants),
+    };
+    for preopen in policy.preopens() {
+        let (dir_perms, file_perms) = match preopen.access {
+            policy::DirAccess::Write => {
+                (wasmtime_wasi::DirPerms::all(), wasmtime_wasi::FilePerms::all())
+            }
+            policy::DirAccess::Read => {
+                (wasmtime_wasi::DirPerms::READ, wasmtime_wasi::FilePerms::READ)
+            }
+        };
+        wasi
+            .preopened_dir(&preopen.host, &preopen.guest, dir_perms, file_perms)
+            .map_err(|e| {
+                wasmtime::Error::msg(format!(
+                    "preopening {} as {}: {e}",
+                    preopen.host.display(),
+                    preopen.guest
+                ))
+            })?;
+    }
+    // Plugin admission comes from the capability entries in document mode
+    // (the flag is the legacy form and was folded above); the pre-merger
+    // semantics hold otherwise: import granted, call follows read-context.
+    let (import_allowed, call_allowed, read_allowed) =
+        policy.plugin_admission("tina/wasm-prompt", plugin_read_context);
+
     wasmtime::ensure!(
-        plugin_path.is_some() || !plugin_read_context,
+        plugin_path.is_some() || !read_allowed,
         "a plugin grant requires --plugin-component"
     );
     let plugin_runtime = if let Some(path) = plugin_path {
@@ -193,16 +246,27 @@ async fn async_main() -> Result<()> {
         }
         // Prebuilt production default: bytes frozen at startup. `--plugin-watch`
         // opts into the compile-on-load dev loop (re-read per hook attach).
+        // In document mode the capability entries decide interface admission
+        // and call authority; the legacy constructors keep the old shape.
+        let plugin_policy = tina_wasm_host::plugin_loader::PluginPolicy {
+            allow_engine_service_import: import_allowed,
+            allow_engine_service_call: call_allowed,
+        };
         let runtime = if plugin_watch {
-            tina_plugin::TinaPluginRuntime::watching_artifact(
+            tina_plugin::TinaPluginRuntime::watching_with_policy(
                 plugin_engine,
                 path.clone(),
-                plugin_read_context,
+                plugin_policy,
+                read_allowed,
                 limits,
             )?
         } else {
-            tina_plugin::TinaPluginRuntime::with_limits(
-                plugin_engine, bytes, plugin_read_context, limits,
+            tina_plugin::TinaPluginRuntime::with_policy(
+                plugin_engine,
+                bytes,
+                plugin_policy,
+                read_allowed,
+                limits,
             )?
         };
         Some(Arc::new(runtime))
@@ -216,7 +280,11 @@ async fn async_main() -> Result<()> {
             wasi: wasi.build(),
             table: ResourceTable::new(),
             http: reqwest::Client::new(),
-            preopens,
+            preopens: policy
+                .preopens()
+                .into_iter()
+                .map(|p| (p.guest, p.host))
+                .collect(),
             process: tina_process::ProcessHost::default(),
         },
     );
