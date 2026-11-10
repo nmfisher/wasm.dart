@@ -274,18 +274,20 @@ async fn async_main() -> Result<()> {
         None
     };
 
+    let preopens: Vec<(String, std::path::PathBuf)> = policy
+        .preopens()
+        .into_iter()
+        .map(|p| (p.guest, p.host))
+        .collect();
     let mut store = Store::new(
         &engine,
         HostState {
             wasi: wasi.build(),
             table: ResourceTable::new(),
             http: reqwest::Client::new(),
-            preopens: policy
-                .preopens()
-                .into_iter()
-                .map(|p| (p.guest, p.host))
-                .collect(),
+            preopens,
             process: tina_process::ProcessHost::default(),
+            policy,
         },
     );
 
@@ -579,13 +581,15 @@ fn plugin_error_val(error: tina_plugin::TinaPluginError) -> Val {
 /// The state the WASI host functions use: the WASI configuration (stdout)
 /// and the resource table its streams live in, plus the shared reqwest
 /// client behind the `tina:http` import, the preopen map `tina:process`
-/// resolves spawn working directories against, and its live children.
+/// resolves spawn working directories against, its live children, and the
+/// capability policy the mediators enforce (`docs/capability_merger.md`).
 struct HostState {
     wasi: WasiCtx,
     table: ResourceTable,
     http: reqwest::Client,
     preopens: Vec<(String, std::path::PathBuf)>,
     process: tina_process::ProcessHost,
+    policy: policy::CapabilityPolicy,
 }
 
 impl HostState {
@@ -594,7 +598,8 @@ impl HostState {
     }
 
     /// A minimal state for `tina_process`'s unit tests: no WASI, an idle
-    /// HTTP client, no preopens.
+    /// HTTP client, no preopens, and a legacy policy so the guest-carried
+    /// profile stays the command authority.
     #[cfg(test)]
     fn for_tests() -> Self {
         HostState {
@@ -603,6 +608,7 @@ impl HostState {
             http: reqwest::Client::new(),
             preopens: Vec::new(),
             process: tina_process::ProcessHost::default(),
+            policy: policy::CapabilityPolicy::from_legacy(Vec::new(), Vec::new()),
         }
     }
 }
