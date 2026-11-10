@@ -8,7 +8,7 @@ serde = "1.0.228"
 serde_json = { version = "1.0.150", features = ["raw_value"] }
 wasmtime = "47.0.2"
 wasmtime-wasi = { version = "47.0.2", features = ["p3"] }
-tokio = { version = "1", features = ["rt", "process", "io-util", "io-std"] }
+tokio = { version = "1", features = ["rt", "process", "io-util", "io-std", "time", "macros"] }
 # The `tina:process` host implementation: the access profile's command
 # patterns are the conservative regexes tina_mode's rules use.
 regex = "1"
@@ -22,3 +22,5 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 futures = "0.3"
 bytes = "1"
+# --tui mode: raw mode (termios), window size (TIOCGWINSZ).
+libc = "0.2"
