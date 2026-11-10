@@ -116,8 +116,11 @@ Schema rules:
   pattern now fails the whole document (stricter than today's per-command deny, and the
   engine validates patterns when compiling, so this never fires for engine-produced docs).
 - `plugins.grants` are explicit entries; the host builds `PluginPolicy` from them.
-- `protected_paths` are never preopened and are excluded from every directory entry
-  (derivation refuses overlap, symlink-resolved, per today's rules).
+- `protected_paths` are never themselves directory entries: a grant landing
+  on or inside a protected path is refused. A protected leaf beneath a
+  broader grant is the native model (known credentials stay protected
+  beneath broader grants, enforced by masking) — it is recorded and the
+  engine enforces it; the preopen wall cannot be finer than the preopen.
 - `preopens` is derived, informational, and exactly what the host materializes at
   instantiation: write-class entries ⇒ rw preopens, read-class ⇒ read-only preopens (p3
   `DirPerms`/`FilePerms` already support this), protected paths never preopened.

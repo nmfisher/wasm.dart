@@ -370,7 +370,7 @@ impl CapabilityPolicy {
                     .map_err(|e| format!("{class} directory {}: {e}", dir.path))?;
                 if let Some(hit) = protected_overlap(&canonical, &protected) {
                     return Err(format!(
-                        "{class} directory {} overlaps protected path {}",
+                        "{class} directory {} lands inside protected path {}",
                         canonical.display(),
                         hit.display()
                     ));
@@ -692,7 +692,7 @@ impl CapabilityPolicy {
                     .map_err(|e| format!("widened directory {path}: {e}"))?;
                 if let Some(hit) = protected_overlap(&canonical, &self.protected) {
                     return Err(format!(
-                        "widened directory {} overlaps protected path {}",
+                        "widened directory {} lands inside protected path {}",
                         canonical.display(),
                         hit.display()
                     ));
@@ -869,13 +869,15 @@ fn normalize_absolute(path: &str, what: &str) -> Result<PathBuf, String> {
     Ok(normalized)
 }
 
-/// The first protected path overlapping `dir`, in either direction (a
-/// protected path under the directory, or the directory under a protected
-/// path).
+/// The first protected path the directory lands inside: a grant on or
+/// under a protected path is a hole, so it is refused. A protected leaf
+/// beneath a broader grant is the native model (known credentials stay
+/// protected beneath broader grants, enforced by masking) - recorded,
+/// not refused; the preopen wall cannot be finer than the preopen.
 fn protected_overlap(dir: &Path, protected: &[PathBuf]) -> Option<PathBuf> {
     protected
         .iter()
-        .find(|p| p.starts_with(dir) || dir.starts_with(p))
+        .find(|p| dir == p.as_path() || dir.starts_with(p))
         .map(|p| p.clone())
 }
 
@@ -1198,11 +1200,12 @@ mod tests {
     }
 
     #[test]
-    fn protected_overlap_fails_the_document() {
+    fn grants_inside_protected_paths_fail_protected_leaves_stand() {
         let ws = temp_dir("ws3");
         let base = document(&[], &[&ws], &derived_preopens_json(&[&ws], &[]));
 
-        // A protected path covering the granted directory (its parent).
+        // A protected path covering the granted directory (its parent) is
+        // a hole: refuse.
         let parent = canonical(&ws)
             .rsplit_once('/')
             .map(|(dir, _)| dir.to_string())
@@ -1213,15 +1216,25 @@ mod tests {
         );
         assert!(CapabilityPolicy::from_document_json(&covering).is_err());
 
-        // A protected path under a granted directory.
-        let nested = document(&[], &[&ws], &derived_preopens_json(&[&ws], &[])).replace(
+        // The grant itself is a protected path: refuse.
+        let itself = document(&[], &[&ws], &derived_preopens_json(&[&ws], &[])).replace(
             "\"protected_paths\": []",
-            &format!(
-                "\"protected_paths\": [\"{}/.tina\"]",
-                canonical(&ws)
-            ),
+            &format!("\"protected_paths\": [\"{}\"]", canonical(&ws)),
         );
-        assert!(CapabilityPolicy::from_document_json(&nested).is_err());
+        assert!(CapabilityPolicy::from_document_json(&itself).is_err());
+
+        // A protected leaf beneath the granted directory is the native
+        // model (known credentials beneath broader grants): valid, and it
+        // joins the snapshot.
+        let leaf = document(&[], &[&ws], &derived_preopens_json(&[&ws], &[])).replace(
+            "\"protected_paths\": []",
+            &format!("\"protected_paths\": [\"{}/.tina\"]", canonical(&ws)),
+        );
+        let policy = CapabilityPolicy::from_document_json(&leaf).expect("a protected leaf beneath a grant stands");
+        assert_eq!(
+            policy.snapshot().protected_paths,
+            vec![format!("{}/.tina", canonical(&ws))]
+        );
     }
 
     #[test]
@@ -1369,7 +1382,7 @@ mod tests {
                 access: DirAccess::Read,
             })
             .expect_err("protected overlap must fail");
-        assert!(error.contains("overlaps"), "error: {error}");
+        assert!(error.contains("lands inside"), "error: {error}");
 
         let elsewhere = temp_dir("elsewhere");
         policy
