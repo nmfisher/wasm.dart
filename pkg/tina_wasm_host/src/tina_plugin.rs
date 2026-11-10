@@ -100,9 +100,33 @@ pub struct TinaPluginRuntime {
 impl TinaPluginRuntime {
     /// Build with explicit execution/resource budgets. The engine must come
     /// from `plugin_loader::plugin_engine_config()` so epoch deadlines work.
+    /// This is the pre-merger admission shape: the engine-service interface
+    /// is importable, and calling it follows the read-context grant.
     pub fn with_limits(
         engine: Engine,
         bytes: Vec<u8>,
+        allow_read_context: bool,
+        limits: PluginLimits,
+    ) -> Result<Self> {
+        Self::with_policy(
+            engine,
+            bytes,
+            PluginPolicy {
+                allow_engine_service_import: true,
+                allow_engine_service_call: allow_read_context,
+            },
+            allow_read_context,
+            limits,
+        )
+    }
+
+    /// Build with an explicit host `PluginPolicy` - the capability
+    /// document's plugin grants (`docs/capability_merger.md`): interface
+    /// admission and call authority are separate entries there.
+    pub fn with_policy(
+        engine: Engine,
+        bytes: Vec<u8>,
+        policy: PluginPolicy,
         allow_read_context: bool,
         limits: PluginLimits,
     ) -> Result<Self> {
@@ -122,10 +146,7 @@ impl TinaPluginRuntime {
             pending_retires: Mutex::new(Vec::new()),
             artifact: None,
             bytes: Mutex::new(bytes),
-            policy: PluginPolicy {
-                allow_engine_service_import: true,
-                allow_engine_service_call: allow_read_context,
-            },
+            policy,
             runtime_id,
         })
     }
@@ -142,6 +163,27 @@ impl TinaPluginRuntime {
             .map_err(|error| wasmtime::Error::msg(format!("reading plugin artifact: {error}")))?;
         let runtime = Self::with_limits(engine, bytes, allow_read_context, limits)?;
         // Safe: the only difference from `with_limits` is the artifact path.
+        let runtime_id = runtime.runtime_id;
+        Ok(Self {
+            artifact: Some(artifact),
+            runtime_id,
+            ..runtime
+        })
+    }
+
+    /// Like `with_policy`, but the component file is re-read on every
+    /// `open` (the document-mode dev loop).
+    pub fn watching_with_policy(
+        engine: Engine,
+        artifact: std::path::PathBuf,
+        policy: PluginPolicy,
+        allow_read_context: bool,
+        limits: PluginLimits,
+    ) -> Result<Self> {
+        let bytes = std::fs::read(&artifact)
+            .map_err(|error| wasmtime::Error::msg(format!("reading plugin artifact: {error}")))?;
+        let runtime = Self::with_policy(engine, bytes, policy, allow_read_context, limits)?;
+        // Safe: the only difference from `with_policy` is the artifact path.
         let runtime_id = runtime.runtime_id;
         Ok(Self {
             artifact: Some(artifact),
