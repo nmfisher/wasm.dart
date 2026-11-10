@@ -28,6 +28,7 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiVie
 
 mod tina_http;
 mod tina_process;
+mod tui;
 
 use tina_wasm_host::tina_plugin;
 
@@ -68,6 +69,20 @@ async fn async_main() -> Result<()> {
         engine_path.is_none() || file.is_none(),
         "pass either a positional engine path or --engine=<path>, not both"
     );
+
+    // Option 2 spike: `--tui <component.wasm>` runs a TUI component against
+    // the real terminal (raw mode owned here, restoration guaranteed on
+    // clean return, trap, or epoch kill). No engine/plugin wiring.
+    if flags.iter().any(|arg| arg == "--tui") {
+        wasmtime::ensure!(
+            engine_path.is_none(),
+            "--tui takes the component as a positional path, not --engine="
+        );
+        let Some(path) = file else {
+            wasmtime::bail!("--tui requires the component path as the positional argument");
+        };
+        return tui::run(&path).await;
+    }
 
     let mut config = Config::default();
     config.wasm_gc(true);
@@ -559,12 +574,12 @@ impl WasiView for HostState {
 /// host hands out, one per stream the host is done with. The run loop waits
 /// that count out between a test's return and its `end` marker.
 #[derive(Default, Clone)]
-struct TrackedStdout {
+pub(crate) struct TrackedStdout {
     counts: Arc<StdoutWriteCounts>,
 }
 
 #[derive(Default)]
-struct StdoutWriteCounts {
+pub(crate) struct StdoutWriteCounts {
     started: AtomicUsize,
     finished: AtomicUsize,
 }
@@ -574,7 +589,7 @@ impl TrackedStdout {
     ///
     /// The runtime is single-threaded (see `main`), so plain atomicity is all
     /// the synchronization these counters need.
-    fn outstanding(&self) -> usize {
+    pub(crate) fn outstanding(&self) -> usize {
         let counts = &self.counts;
         counts.started.load(Ordering::Relaxed) - counts.finished.load(Ordering::Relaxed)
     }
@@ -598,7 +613,7 @@ impl wasmtime_wasi::cli::StdoutStream for TrackedStdout {
 /// One guest stdout stream: straight through to the process's stdout, exactly
 /// like wasmtime-wasi's `StdioOutputStream`, counting itself done when the
 /// host drops it - which happens once the pipe has written every byte.
-struct TrackedStdoutStream {
+pub(crate) struct TrackedStdoutStream {
     counts: Arc<StdoutWriteCounts>,
 }
 
@@ -628,8 +643,8 @@ impl tokio::io::AsyncWrite for TrackedStdoutStream {
 
 /// [tokio::io::AsyncRead] over an mpsc channel a feeder thread owns:
 /// each ready chunk is one read; channel close is EOF.
-struct ChannelReader {
-    receiver: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+pub(crate) struct ChannelReader {
+    pub(crate) receiver: tokio::sync::mpsc::Receiver<bytes::Bytes>,
 }
 
 impl tokio::io::AsyncRead for ChannelReader {
@@ -660,7 +675,7 @@ fn post_event(event: &TestEvent) {
 /// or by the case runner's JavaScript host. `func_name` comes from the
 /// module's name section, which dart2wasm emits for every function at `-O0`
 /// (this suite's optimization level), so a frame is never just an index.
-fn render_frame(frame: &wasmtime::FrameInfo) -> String {
+pub(crate) fn render_frame(frame: &wasmtime::FrameInfo) -> String {
     let name = frame.func_name().unwrap_or("<unnamed>");
     format!("M.{}", name)
 }
