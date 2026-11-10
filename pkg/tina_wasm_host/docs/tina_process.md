@@ -4,9 +4,15 @@ WASI has no process spawn. When the tina engine runs as a wasm component,
 the HOST executes real processes on the engine's behalf: the engine sends
 a spawn request, the host decides whether it may run, and the child's
 output streams back through the same waitable-set machinery `tina:http`
-bodies use. The interface is `tina:process/process@1.0.0`
+bodies use. The interface is `tina:process/process@1.1.0`
 (`wit/tina_process.wit`, implemented in `src/tina_process.rs`); the
 Dart-side binding lives in the tina repository (`tina_wasm`).
+
+1.1.0 (the capability merger, `docs/capability_merger.md`): the command
+rules are HOST-HELD - the capability document the host was launched with
+is the authority, and a request may carry an access profile only as a
+fail-closed backstop assertion (deny beats ask beats allow). Verdict
+semantics, reason strings, and the approval round-trip are unchanged.
 
 Out of scope, deliberately: no shell, no pseudoterminal, no globbing, no
 signals other than kill, no `setuid`, no timeouts. `argv` is a list of
