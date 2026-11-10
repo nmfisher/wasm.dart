@@ -28,6 +28,7 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiVie
 
 mod policy;
 mod tina_http;
+mod tina_policy;
 mod tina_process;
 
 use tina_wasm_host::tina_plugin;
@@ -435,9 +436,13 @@ async fn async_main() -> Result<()> {
     // components that import `tina:http/client@1.0.0` reach it.
     tina_http::add_to_linker(&mut linker)?;
     // The tina engine's process port: the host runs real processes for
-    // the engine behind the `tina:process` access profile. Only
-    // components that import `tina:process/process@1.0.0` reach it.
+    // the engine behind its host-held capability rules. Only components
+    // that import `tina:process/process@1.1.0` reach it.
     tina_process::add_to_linker(&mut linker)?;
+    // The capability escalation channel: the engine widens the live
+    // policy after an approved grant. Only components that import
+    // `tina:policy/policy@1.0.0` reach it.
+    tina_policy::add_to_linker(&mut linker)?;
     {
         use wasmtime::component::Val;
         let mut root = linker.root();
