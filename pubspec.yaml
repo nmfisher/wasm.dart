@@ -10,7 +10,7 @@ workspace:
   - pkg/wasm_tools/example/greeting
   - integration_tests
 
-  - pkg/test_runner
+  - pkg/tina_wasm_host
   - pkg/wasi
   - pkg/wasm_components
   - pkg/wasm_tools

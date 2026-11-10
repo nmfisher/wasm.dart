@@ -54,7 +54,7 @@ Engine side (tina @ `codex/issue85-plugin-management`):
 
 Host side (wasm.dart @ `codex/issue85-loader-current-main`):
 
-- `pkg/tina_wasm_host/src/main.rs`: flags `--engine=` / positional engine, `--preopen=
+- `pkg/tina_wasm_host/src/main.rs` (embedded-only; see §10): flags `--capabilities=<path>`, `--preopen=guest=host` (**always DirPerms::all/FilePerms::all** in the legacy fold - no read/write split), `--env=`, `--no-stdin`, `--plugin-component=`, `--plugin-grant=session.read-context`, `--plugin-watch`, `--plugin-call-timeout-ms=`. Unknown flags **bail**. `HostState {wasi, table, http: reqwest::Client::new(), preopens, process}`.
   guest=host` (**always DirPerms::all/FilePerms::all** — no read/write split), `--env=`,
   `--no-stdin`, `--plugin-component=`, `--plugin-grant=session.read-context`,
   `--plugin-watch`, `--plugin-call-timeout-ms=`. Unknown flags **bail**. `HostState {wasi,
@@ -324,3 +324,25 @@ carry equal-or-stronger assertions); branches only, no merges, no PRs; identitie
    wasm containment-check dedup.
 7. Parity harness (§8 matrix) + compat goldens; full suites green in both repos.
 8. Push both branches; record identities + artifact shas in the replay ledger.
+
+## 10. Embedded-only and default discovery (principal directive)
+
+The packaged host runs the engine compiled into it: `--engine=<path>` and
+the positional engine path are deleted, and engine updates require
+rebuilding the host (`TINA_WASM_HOST_ENGINE=<engine.wasm> cargo build -p
+tina-wasm-host`, about 2 minutes incremental). The case suite's
+positional-component surface moved to `tina-case-runner` (same session
+flags, one positional component) - harness scripts rebuild the host
+whenever the engine component is newer than the binary, into their own
+scratch target, never over a packaged binary.
+
+Bare invocation boots a working session like native tina (default
+discovery): the current directory is the read-write workspace, the
+user's `~/.tina/config` is preopened read-only (symlinks resolved); with
+no tina config the host fails with a friendly message naming the path
+(`run tina once to create one, or pass --preopen=config=<dir>`). The
+discovered policy is the legacy fold (`policy.rs`
+`from_default_discovery`): command policy rides the guest-carried
+profile, domains unrestricted - enforcement semantics unchanged, only
+the preopen defaults are new. Every existing flag still works and fills
+in only what is missing.
