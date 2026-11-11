@@ -54,6 +54,23 @@ path, epoch machinery for parked guests (spike findings 1/2 wired).
    TUI-guest boots-to-ready smoke, `--headless` dispatch unit tests, and
    the existing 54 host tests unchanged and green.
 
+## Landed (18a37f2)
+
+- `runner.rs`: `prepare()` (engine/store/component + policy, preopens,
+  plugin runtime; `epoch` + `raw_stdin` knobs) and `build_linker()` shared
+  by both legs; `run_guest` keeps its case-runner protocol.
+- `tina_term.rs`: `tina:term` linked with plain `func_wrap` (flat
+  functions — no bindgen; a world cannot import its own package's
+  interfaces, spike finding 7 on the wasmtime side). `CrashState` with
+  unit tests; the crash message is surfaced on instantiate failure too.
+- `tui.rs`: raw mode before the pump, epoch trap + pre-instantiation
+  ticker, watchdog knobs, crash-select around the parked run.
+- Smoke (tmux, embedded release host): full TUI boots in the sandbox —
+  status strip, config via the snapshot preopen, keys into the guest
+  editor.
+- Tests: host crate 57/57 (54 baseline + 3 crash-channel) + 4
+  integration.
+
 ## Validation (with the orchestrator's tmux leg)
 
 Interactive tmux: keys, ANSI rendering, resize via the guest's 250 ms
