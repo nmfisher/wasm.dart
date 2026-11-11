@@ -22,5 +22,12 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 futures = "0.3"
 bytes = "1"
-# --tui mode: raw mode (termios), window size (TIOCGWINSZ).
 libc = "0.2"
+
+[[bin]]
+name = "tina-wasm-host"
+path = "src/main.rs"
+
+[[bin]]
+name = "tina-case-runner"
+path = "src/bin/case_runner.rs"

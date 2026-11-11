@@ -1,13 +1,16 @@
 //! The `tina:process` host import: the engine's process port served by
 //! the host, because WASI has no process spawn. Spec: `docs/tina_process.md`.
 //!
-//! The engine sends the access profile with every request; this side is
-//! the only side that can spawn, so it is the side that enforces: the
-//! profile is evaluated before any process exists, an `ask` verdict
-//! returns to the engine as an approval request (the host cannot call
-//! back into a blocked guest), and the child's stdout/stderr stream to
-//! the guest through the same `StreamReader` machinery `tina:http`
-//! bodies use - the guest-side waitable-set join serves them unchanged.
+//! The host enforces the capability document it was launched with
+//! (`docs/capability_merger.md`); this side is the only side that can
+//! spawn, so it is the side that enforces: the host-held command rules
+//! are evaluated before any process exists, an `ask` verdict returns to
+//! the engine as an approval request (the host cannot call back into a
+//! blocked guest), and the child's stdout/stderr stream to the guest
+//! through the same `StreamReader` machinery `tina:http` bodies use -
+//! the guest-side waitable-set join serves them unchanged. A request may
+//! still carry an access profile as a fail-closed backstop assertion:
+//! deny beats ask beats allow.
 //!
 //! The interface (see `wit/tina_process.wit`) is deliberately minimal:
 //! `spawn`, `respond`, `wait`, `kill`. No shell, no pseudoterminal, no
@@ -32,6 +35,8 @@ use wasmtime::component::{
 };
 use wasmtime::StoreContextMut;
 use wasmtime::AsContextMut as _;
+
+use crate::policy::Decision;
 
 pub mod bindings {
     wasmtime::component::bindgen!({
@@ -89,17 +94,10 @@ struct PendingSpawn {
     stdin: Option<Vec<u8>>,
 }
 
-/// The profile verdict for one command line.
-enum Decision {
-    Allow,
-    Denied { reason: String },
-    Ask { reason: String },
-}
-
-/// Evaluates the access profile against the joined command line:
-/// first anchored match decides, no match asks, an invalid pattern
-/// fails closed. The reason strings are interface contract (the native
-/// port produces the same ones); see the spec.
+/// Evaluates the guest-carried backstop profile against the joined
+/// command line: first anchored match decides, no match asks, an invalid
+/// pattern fails closed. The reason strings are interface contract (the
+/// native port produces the same ones); see the spec.
 fn evaluate(profile: &AccessProfile, command: &str) -> Decision {
     evaluate_rules(&profile.rules, command)
 }
@@ -386,7 +384,20 @@ where
             return Err(Error::Message("argv must not be empty".to_string()));
         }
         let command_line = req.argv.join(" ");
-        match evaluate(&req.profile, &command_line) {
+        // The host-held capability rules decide; the optional backstop
+        // profile can only tighten (deny beats ask beats allow). In legacy
+        // mode - no capability document - the profile stays the authority,
+        // exactly as before the merger.
+        let decision = store.with(|mut access| {
+            let state = access.get();
+            let host = state.policy.evaluate_command(&command_line);
+            let guest = req
+                .profile
+                .as_ref()
+                .map(|profile| evaluate(profile, &command_line));
+            state.policy.evaluate_union(host, guest)
+        });
+        match decision {
             Decision::Allow => {
                 let pending = store.with(|mut access| {
                     let state = access.get();
@@ -693,5 +704,96 @@ mod tests {
     fn unknown_ids_fail() {
         let mut state = host_state();
         assert!(take_child(&mut state, 99).is_err());
+    }
+
+    /// In document mode the host-held capability rules decide; a
+    /// guest-carried profile can only tighten the verdict.
+    #[test]
+    fn document_policy_decides_and_the_backstop_tightens() {
+        let ws = std::env::temp_dir().join(format!("tina-process-doc-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let canonical = std::fs::canonicalize(&ws).unwrap().display().to_string();
+        let document = format!(
+            r#"{{
+                "version": 1,
+                "mode": "allow-edits",
+                "workspace": "{canonical}",
+                "directories": {{
+                    "read": [],
+                    "write": [{{"path": "{canonical}", "guest": ".", "origin": "structural:workspace"}}]
+                }},
+                "network": {{
+                    "allow_all": false,
+                    "domains": []
+                }},
+                "commands": {{
+                    "default_verdict": "ask",
+                    "rules": [
+                        {{"pattern": "git status", "verdict": "allow", "origin": "grant:g1"}},
+                        {{"pattern": "rm .*", "verdict": "deny", "origin": "grant:g2"}}
+                    ]
+                }},
+                "plugins": {{"grants": []}},
+                "protected_paths": [],
+                "preopens": [{{"guest": ".", "host": "{canonical}", "access": "rw", "origin": "structural:workspace"}}]
+            }}"#);
+        let policy = crate::policy::CapabilityPolicy::from_document_json(&document)
+            .expect("valid document");
+        let mut state = host_state();
+        state.policy = policy;
+
+        // Host rules decide without any profile.
+        assert!(matches!(
+            state.policy.evaluate_command("git status"),
+            Some(Decision::Allow)
+        ));
+        assert!(matches!(
+            state.policy.evaluate_command("rm -rf x"),
+            Some(Decision::Denied { .. })
+        ));
+
+        // Backstop union: deny beats allow, in both directions.
+        let host_allow = state.policy.evaluate_command("git status").unwrap();
+        let guest_deny = evaluate(&AccessProfile {
+            rules: vec![rule("git .*", Verdict::Deny)],
+        }, "git status");
+        match state.policy.evaluate_union(Some(host_allow.clone()), Some(guest_deny)) {
+            Decision::Denied { .. } => {}
+            other => panic!("guest deny must tighten a host allow, got {other:?}"),
+        }
+        let host_deny = state.policy.evaluate_command("rm -rf x").unwrap();
+        let guest_allow = evaluate(&AccessProfile {
+            rules: vec![rule("rm .*", Verdict::Allow)],
+        }, "rm -rf x");
+        match state.policy.evaluate_union(Some(host_deny), Some(guest_allow)) {
+            Decision::Denied { .. } => {}
+            other => panic!("host deny must stand against a guest allow, got {other:?}"),
+        }
+        // Host ask (no match) stands even when the guest asserts allow.
+        let host_ask = state.policy.evaluate_command("cargo build").unwrap();
+        match state.policy.evaluate_union(Some(host_ask), Some(Decision::Allow)) {
+            Decision::Ask { .. } => {}
+            other => panic!("host ask must stand against a guest allow, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// In legacy mode - no capability document - the guest-carried profile
+    /// stays the command authority, exactly as before the merger.
+    #[test]
+    fn legacy_policy_keeps_the_guest_profile_authoritative() {
+        let state = host_state();
+        assert_eq!(state.policy.evaluate_command("git status"), None);
+        let guest_allow = evaluate(&AccessProfile {
+            rules: vec![rule("git status", Verdict::Allow)],
+        }, "git status");
+        match state.policy.evaluate_union(None, Some(guest_allow)) {
+            Decision::Allow => {}
+            other => panic!("the guest profile decides in legacy mode, got {other:?}"),
+        }
+        match state.policy.evaluate_union(None, None) {
+            Decision::Ask { reason } => assert_eq!(reason, "no rule matched the command"),
+            other => panic!("no rules and no profile asks, got {other:?}"),
+        }
     }
 }

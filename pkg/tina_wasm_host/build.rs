@@ -14,9 +14,27 @@ fn main() {
     let out = Path::new(&env::var("OUT_DIR").expect("OUT_DIR")).join("engine.component.wasm");
     match env::var_os("TINA_WASM_HOST_ENGINE") {
         Some(path) => {
-            fs::copy(&path, &out)
+            let path = Path::new(&path);
+            // The env value alone does not trigger a rebuild when it is
+            // unchanged: watch the FILE, so a rebuilt engine component is
+            // re-embedded instead of silently shipping stale bytes.
+            println!("cargo:rerun-if-changed={}", path.display());
+            fs::copy(path, &out)
                 .unwrap_or_else(|error| panic!("copying embedded engine {path:?}: {error}"));
         }
         None => fs::write(&out, b"").expect("writing the empty engine placeholder"),
+    }
+
+    // The Option 2 TUI component embeds the same way (docs/wasm_tui.md).
+    println!("cargo:rerun-if-env-changed=TINA_WASM_HOST_TUI");
+    let tui_out = Path::new(&env::var("OUT_DIR").expect("OUT_DIR")).join("tui.component.wasm");
+    match env::var_os("TINA_WASM_HOST_TUI") {
+        Some(path) => {
+            let path = Path::new(&path);
+            println!("cargo:rerun-if-changed={}", path.display());
+            fs::copy(path, &tui_out)
+                .unwrap_or_else(|error| panic!("copying embedded TUI component {path:?}: {error}"));
+        }
+        None => fs::write(&tui_out, b"").expect("writing the empty TUI placeholder"),
     }
 }
