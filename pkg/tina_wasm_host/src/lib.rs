@@ -10,6 +10,7 @@ pub mod tina_http;
 pub mod tina_policy;
 pub mod tina_plugin;
 pub mod tina_process;
+pub mod tina_term;
 pub mod tui;
 
 // The mediators hang their implementations off the concrete store

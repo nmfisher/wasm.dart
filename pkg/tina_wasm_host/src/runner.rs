@@ -170,7 +170,31 @@ pub fn parse_flags(args: impl Iterator<Item = String>) -> Result<GuestFlags> {
     Ok(flags)
 }
 
-pub async fn run_guest(component_bytes: Vec<u8>, flags: GuestFlags) -> Result<()> {
+/// Everything the two composition legs share, built and ready for a linker:
+/// the engine, the store (WASI context, capability policy, preopens, plugin
+/// runtime), and the compiled component. `epoch` opts the engine into epoch
+/// interruption (the TUI leg's parked-guest kill); `raw_stdin` puts the
+/// terminal in raw mode BEFORE the stdin pump starts (the pump must see raw
+/// bytes - the TUI leg).
+pub(crate) struct Prepared {
+    pub engine: wasmtime::Engine,
+    pub store: Store<HostState>,
+    pub component: Component,
+    pub stdout: TrackedStdout,
+    /// The stdin pump's sender: the TUI watchdog injects Ctrl-C through it
+    /// (the host owns the byte stream). None with `--no-stdin`.
+    pub stdin_tx: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
+    pub plugin_runtime: Option<std::sync::Arc<tina_plugin::TinaPluginRuntime>>,
+}
+
+pub(crate) fn prepare(
+    component_bytes: &[u8],
+    flags: &GuestFlags,
+    epoch: bool,
+    raw_stdin: bool,
+) -> Result<Prepared> {
+    let flags = flags;
+
 
     let mut config = Config::default();
     config.wasm_gc(true);
@@ -184,6 +208,12 @@ pub async fn run_guest(component_bytes: Vec<u8>, flags: GuestFlags) -> Result<()
     // Timers are wait-for subtasks: without this the clock import is a
     // stub returning an error.
     config.wasm_component_model_more_async_builtins(true);
+    if epoch {
+        // The TUI leg's parked-guest kill: an expired deadline traps
+        // (async stores default to yield-and-extend, wired explicitly in
+        // the TUI runner).
+        config.epoch_interruption(true);
+    }
 
     let engine = wasmtime::Engine::new(&config)?;
     // Guest prints go through our own stdout sink (see `TrackedStdout`) so the
@@ -203,6 +233,11 @@ pub async fn run_guest(component_bytes: Vec<u8>, flags: GuestFlags) -> Result<()
     // directory grants (write grants rw, read grants ro). Without it the
     // legacy flags fold into a policy that behaves exactly like the
     // pre-merger host.
+    if raw_stdin {
+        // Raw mode BEFORE the stdin pump starts: the pump must see raw bytes.
+        crate::tui::RawMode::enable()?;
+    }
+    let mut stdin_tx: Option<tokio::sync::mpsc::Sender<bytes::Bytes>> = None;
     let mut wasi = WasiCtxBuilder::new();
     wasi.stdout(stdout.clone());
     // The tina engine's `--pipes` protocol reads its driving requests
@@ -216,6 +251,7 @@ pub async fn run_guest(component_bytes: Vec<u8>, flags: GuestFlags) -> Result<()
         // thread pumps process stdin into a channel, and the guest reads
         // the channel: interactive pipes stay live, EOF arrives as EOF.
         let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(16);
+        stdin_tx = Some(tx.clone());
         std::thread::spawn(move || {
             use std::io::Read as _;
             let mut stdin = std::io::stdin().lock();
@@ -362,7 +398,7 @@ pub async fn run_guest(component_bytes: Vec<u8>, flags: GuestFlags) -> Result<()
         .into_iter()
         .map(|p| (p.guest, p.host))
         .collect();
-    let mut store = Store::new(
+    let store = Store::new(
         &engine,
         HostState {
             wasi: wasi.build(),
@@ -372,25 +408,31 @@ pub async fn run_guest(component_bytes: Vec<u8>, flags: GuestFlags) -> Result<()
             process: crate::tina_process::ProcessHost::default(),
             policy,
             http_approvals: crate::tina_http::HttpApprovals::default(),
+            crash: crate::tina_term::CrashState::default(),
         },
     );
 
-    let component = Component::new(&engine, component_bytes)?;
-    let Some(run_instance_index) = component.get_export_index(None, "wasmdart:tests/tested-module")
-    else {
-        wasmtime::bail!("Missing tests export");
-    };
-    let Some(count_test_idx) = component.get_export_index(Some(&run_instance_index), "count-tests")
-    else {
-        wasmtime::bail!("Missing count-tests");
-    };
-    let Some(invoke_test_idx) =
-        component.get_export_index(Some(&run_instance_index), "invoke-test")
-    else {
-        wasmtime::bail!("Missing invoke-test");
-    };
+        let component = Component::new(&engine, component_bytes)?;
+    Ok(Prepared {
+        engine,
+        store,
+        component,
+        stdout,
+        stdin_tx,
+        plugin_runtime,
+    })
+}
 
-    let mut linker = Linker::new(&engine);
+/// The host import surface both legs share: the case runner's result
+/// collector (harmless when the component does not import it), dart2wasm's
+/// trace + timeline backends, WASI p3, the tina:http / tina:process /
+/// tina:policy mediators, and the plugin session. The TUI leg adds
+/// `tina:term` on top (see `tina_term.rs`).
+pub(crate) fn build_linker(
+    engine: &wasmtime::Engine,
+    plugin_runtime: &Option<std::sync::Arc<tina_plugin::TinaPluginRuntime>>,
+) -> Result<Linker<HostState>> {
+    let mut linker = Linker::new(engine);
     {
         let mut root = linker.root();
         let mut collector = root.instance("wasmdart:tests/result-collector")?;
@@ -589,6 +631,37 @@ pub async fn run_guest(component_bytes: Vec<u8>, flags: GuestFlags) -> Result<()
         })?;
     }
 
+    Ok(linker)
+}
+
+
+/// The headless pipes leg: the case-runner protocol over the embedded
+/// engine component (`docs/capability_merger.md`).
+pub async fn run_guest(component_bytes: Vec<u8>, flags: GuestFlags) -> Result<()> {
+    let Prepared {
+        engine,
+        mut store,
+        component,
+        stdout,
+        stdin_tx: _,
+        plugin_runtime,
+    } = prepare(&component_bytes, &flags, false, false)?;
+    let Some(run_instance_index) = component.get_export_index(None, "wasmdart:tests/tested-module")
+    else {
+        wasmtime::bail!("Missing tests export");
+    };
+    let Some(count_test_idx) = component.get_export_index(Some(&run_instance_index), "count-tests")
+    else {
+        wasmtime::bail!("Missing count-tests");
+    };
+    let Some(invoke_test_idx) =
+        component.get_export_index(Some(&run_instance_index), "invoke-test")
+    else {
+        wasmtime::bail!("Missing invoke-test");
+    };
+
+
+    let linker = build_linker(&engine, &plugin_runtime)?;
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let count = instance.get_func(&mut store, count_test_idx).unwrap();
     let invoke = instance.get_func(&mut store, invoke_test_idx).unwrap();
@@ -661,6 +734,10 @@ pub struct HostState {
     pub policy: policy::CapabilityPolicy,
     /// Parked domain approvals for `tina:http`'s `respond`.
     pub http_approvals: crate::tina_http::HttpApprovals,
+    /// The `tina:term/crash` channel state: a guest Dart exception lands
+    /// here before the WASI exit backstop, and the TUI runner's parked
+    /// wait selects on it (spike finding 4).
+    pub crash: crate::tina_term::CrashState,
 }
 
 impl HostState {
@@ -681,6 +758,7 @@ impl HostState {
             process: crate::tina_process::ProcessHost::default(),
             policy: policy::CapabilityPolicy::from_legacy(Vec::new(), Vec::new()),
             http_approvals: crate::tina_http::HttpApprovals::default(),
+            crash: crate::tina_term::CrashState::default(),
         }
     }
 }

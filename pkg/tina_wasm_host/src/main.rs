@@ -53,13 +53,14 @@ fn main() -> wasmtime::Result<()> {
             );
             tina_wasm_host::runner::run_guest(embedded.to_vec(), flags).await
         } else {
+            let flags = tina_wasm_host::runner::parse_flags(args)?;
             let embedded = include_bytes!(concat!(env!("OUT_DIR"), "/tui.component.wasm"));
             wasmtime::ensure!(
                 !embedded.is_empty(),
                 "no TUI component embedded in this build; rebuild with \
                  TINA_WASM_HOST_TUI=<component> and cargo build (~2 minutes incremental)"
             );
-            tina_wasm_host::tui::run_bytes(embedded).await
+            tina_wasm_host::tui::run_bytes(embedded.to_vec(), flags).await
         }
     })
 }
