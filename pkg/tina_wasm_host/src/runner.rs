@@ -208,6 +208,15 @@ pub(crate) fn prepare(
     // Timers are wait-for subtasks: without this the clock import is a
     // stub returning an error.
     config.wasm_component_model_more_async_builtins(true);
+    // The TUI guest compiles to ~4.8 MB of dart2wasm output; Cranelift takes
+    // minutes on a contended 4-core box and every bare `tina-wasm-host` boot
+    // paid it again. wasmtime's compilation cache (keyed on module bytes +
+    // config) makes the first boot pay and the rest load. Diagnostic note,
+    // milestone 3: the boot "wedge" reports on this box were exactly this
+    // compilation under CPU starvation - the spinning thread is cranelift.
+    if let Ok(cache) = wasmtime::Cache::from_file(None) {
+        config.cache(Some(cache));
+    }
     if epoch {
         // The TUI leg's parked-guest kill: an expired deadline traps
         // (async stores default to yield-and-extend, wired explicitly in

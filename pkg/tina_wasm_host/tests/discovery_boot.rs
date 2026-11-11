@@ -38,6 +38,12 @@ fn fixture(label: &str) -> std::path::PathBuf {
 /// session `ready`.
 fn assert_boots_to_ready(home: &std::path::Path, workspace: &std::path::Path) {
     let output = Command::new(runner().expect("runner path"))
+        // The wasm-tui round switched the dispatch: bare invocation boots the
+        // TUI leg (default), so the discovery/pipes leg passes --headless
+        // explicitly (main.rs mode switch takes the first argument).
+        // Superseded assertion updated with note: the discovery behavior is
+        // unchanged; only its selector is new.
+        .arg("--headless")
         .current_dir(workspace)
         .env("HOME", home)
         .stdin(Stdio::null())
@@ -122,6 +128,8 @@ fn bare_discovery_without_a_config_fails_with_the_friendly_message() {
     let home = fixture("empty-home");
     let workspace = fixture("workspace2");
     let output = Command::new(runner)
+        // --headless: see the note on the first invocation in this file.
+        .arg("--headless")
         .current_dir(&workspace)
         .env("HOME", &home)
         .stdin(Stdio::null())
