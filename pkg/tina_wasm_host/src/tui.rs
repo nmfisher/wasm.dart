@@ -1,94 +1,59 @@
-//! The `--tui` mode (Option 2 spike, issue #85): run a wasm TUI component
-//! against the real terminal. The host owns the tty — raw mode, window size,
-//! byte transport and restoration — while the guest draws ANSI bytes and
-//! parses stdin bytes. Spike scope: not production, no plugin/engine wiring.
+//! The TUI leg of the packaged host (Option 2, issue #85): run the FULL
+//! tina TUI component inside the sandbox against the real terminal. The
+//! host owns the tty — raw mode enabled before the stdin pump, byte
+//! transport, the live `TIOCGWINSZ` size authority (`tina:term/tty`), the
+//! crash channel (`tina:term/crash`, spike finding 4), epoch machinery for
+//! parked guests (spike findings 1/2), and restoration on every exit
+//! path — while the guest draws ANSI bytes, parses stdin bytes and boots
+//! the whole session assembly inside the sandbox (discovery preopens,
+//! capability policy, plugin runtime: all of `runner::prepare`).
 //!
-//! Contract: `tina-wasm-host --tui <component.wasm>` puts the terminal in raw
-//! mode BEFORE the stdin pump starts, forwards process stdin bytes to the
-//! guest and guest stdout bytes to the terminal, answers `tina:term/tty`
-//! `get-size` with the live window (so the guest's poll sees resizes), and
-//! restores the terminal when `run` returns cleanly, when it traps, and when
-//! an epoch deadline kills a parked guest (`TINA_TUI_EPOCH_TICKS`).
-use std::{env, io::Read as _, time::Duration};
+//! Contract: raw mode before the pump; guest stdout bytes to the terminal;
+//! `get-size` answered with the live window (the guest polls at 250 ms);
+//! terminal restored when `run` returns cleanly, when it traps, when an
+//! epoch deadline kills a parked guest, AND when the guest's zone guard
+//! reports a crash (`crash.fail` + WASI exit backstop — the host surfaces
+//! `guest crashed: <message>` and never parks).
+use std::{env, time::Duration};
 
-use wasmtime::{
-    Config,
-    Engine,
-    StoreContextMut,
-    WasmBacktrace,
-    Result,
-    Store,
-    component::{Component, Linker, Val},
-};
-use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p3, cli::AsyncStdinStream};
 
-/// Host state for the wasi host functions: the WASI configuration and the
-/// resource table its streams live in. Nothing else — the TUI guest imports
-/// no tina:http / tina:process / plugin surfaces.
-struct TuiHostState {
-    wasi: WasiCtx,
-    table: ResourceTable,
-}
+use wasmtime::{Engine, Result, component::Val};
 
-impl WasiView for TuiHostState {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.wasi,
-            table: &mut self.table,
-        }
-    }
-}
 
-/// The live terminal window size, stdout first, stdin as fallback.
-pub fn window_size() -> Result<(u32, u32)> {
-    for fd in [1, 0] {
-        // SAFETY: winsize is a plain POD struct and the ioctl only fills it.
-        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-        // SAFETY: querying the window size of our own std fds.
-        let ok = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) } == 0;
-        if ok && ws.ws_col > 0 && ws.ws_row > 0 {
-            return Ok((ws.ws_col as u32, ws.ws_row as u32));
-        }
-    }
-    Err(wasmtime::Error::msg("no terminal window size (not a tty?)"))
-}
-
-/// Raw mode on stdin, restored on [Drop] — including across traps and epoch
-/// kills, which surface as `Err` from the guest call but still unwind here.
-struct RawMode {
-    saved: libc::termios,
+/// Raw mode on stdin, restored on [Drop] — including across traps and
+/// epoch kills, which surface as `Err` from the guest call but still
+/// unwind here.
+pub(crate) struct RawMode {
+    original: libc::termios,
     active: bool,
 }
 
 impl RawMode {
-    fn enable() -> Result<Self> {
-        // SAFETY: tcgetattr/tcsetattr on our own stdin fd with a valid termios.
-        let saved: libc::termios = unsafe {
-            let mut t: libc::termios = std::mem::zeroed();
-            wasmtime::ensure!(
-                libc::tcgetattr(0, &mut t) == 0,
-                "tcgetattr failed: stdin is not a terminal"
-            );
-            t
-        };
-        let mut raw = saved;
-        // SAFETY: cfmakeraw only adjusts the copy's flags.
+    pub(crate) fn enable() -> Result<Self> {
+        use std::os::fd::AsRawFd as _;
+        let mut original: libc::termios = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::tcgetattr(std::io::stdin().as_raw_fd(), &mut original) };
+        if rc != 0 {
+            wasmtime::bail!("tcgetattr failed: stdin is not a terminal");
+        }
+        let mut raw = original;
         unsafe { libc::cfmakeraw(&mut raw) };
-        wasmtime::ensure!(
-            // SAFETY: applying raw mode to our own stdin fd.
-            unsafe { libc::tcsetattr(0, libc::TCSANOW, &raw) } == 0,
-            "tcsetattr (raw mode) failed"
-        );
+        let rc = unsafe { libc::tcsetattr(std::io::stdin().as_raw_fd(), libc::TCSANOW, &raw) };
+        if rc != 0 {
+            wasmtime::bail!("tcsetattr (raw mode) failed");
+        }
         Ok(Self {
-            saved,
+            original,
             active: true,
         })
     }
 
     fn restore(&mut self) {
         if self.active {
-            // SAFETY: restoring the saved termios on our own stdin fd.
-            unsafe { libc::tcsetattr(0, libc::TCSANOW, &self.saved) };
+            use std::os::fd::AsRawFd as _;
+            unsafe {
+                libc::tcsetattr(std::io::stdin().as_raw_fd(), libc::TCSANOW, &self.original);
+            }
             self.active = false;
         }
     }
@@ -100,128 +65,61 @@ impl Drop for RawMode {
     }
 }
 
-/// Run the TUI component over the real terminal. Returns once the guest's
-/// `run` export completes (or fails); the terminal is always restored first.
-/// Spike scope retained through the production rewire: the guest imports
-/// only WASI + `tina:term/tty` here; the production TUI guest's tina host
-/// imports, discovery preopens and failure channel are the implementation
-/// milestone (`docs/wasm_tui.md`).
-pub async fn run_bytes(bytes: &[u8]) -> Result<()> {
-    let mut config = Config::default();
-    config.wasm_gc(true);
-    config.wasm_function_references(true);
-    config.wasm_exceptions(true);
-    config.wasm_component_model_async(true);
-    // Timers are wait-for subtasks: without this the clock import is a stub.
-    config.wasm_component_model_more_async_builtins(true);
-    // Epoch interruption: the ticker below keeps the guest alive, an
-    // opt-in deadline (`TINA_TUI_EPOCH_TICKS`) makes a parked guest's next
-    // waitable trap — the forced-kill restore case.
-    config.epoch_interruption(true);
-    let engine = Engine::new(&config)?;
-    // With epoch interruption enabled the ticker must run from the very
-    // start: instantiation itself is interruptible, so a late ticker traps
-    // the guest before the first frame.
-    {
-        let tick_engine = engine.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_millis(10));
-            tick_engine.increment_epoch();
-        });
-    }
-
-    let component = Component::new(&engine, &bytes)?;
-
-    // Raw mode before the stdin pump starts: the pump must see raw bytes.
+/// Run the embedded TUI component over the real terminal with the full
+/// runner machinery (discovery, policy, plugins — `runner::prepare`) plus
+/// the terminal wrapping. Returns when the guest's `run` export completes
+/// or fails; crashes, traps and epoch kills exit non-zero after the
+/// terminal is restored.
+pub async fn run_bytes(component_bytes: Vec<u8>, flags: crate::runner::GuestFlags) -> Result<()> {
+    // Raw mode BEFORE prepare(): the stdin pump starts inside prepare and
+    // must see raw bytes.
     let mut raw = RawMode::enable()?;
-    let (cols, rows) = window_size()?;
 
-    let stdout = crate::runner::TrackedStdout::default();
-    let mut wasi = WasiCtxBuilder::new();
-    wasi.stdout(stdout.clone());
-    // The initial size also rides the environment (the tty import stays the
-    // live authority — the env snapshot cannot follow a resize).
-    wasi.env("TINA_TUI_COLS", &cols.to_string());
-    wasi.env("TINA_TUI_ROWS", &rows.to_string());
-    // `tokio::io::stdin` blocks the single-threaded runtime; a plain thread
-    // pumps process stdin into a channel (the engine mode's pattern). The
-    // watchdog keeps a clone of the sender (see below).
-    let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(16);
-    let watchdog_tx = tx.clone();
-    std::thread::spawn(move || {
-        let mut stdin = std::io::stdin().lock();
-        let mut buffer = [0u8; 8192];
-        loop {
-            match stdin.read(&mut buffer) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let chunk = bytes::Bytes::copy_from_slice(&buffer[..n]);
-                    if tx.blocking_send(chunk).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-    wasi.stdin(AsyncStdinStream::new(crate::runner::ChannelReader { receiver: rx }));
+    let crate::runner::Prepared {
+        engine,
+        mut store,
+        component,
+        stdout,
+        stdin_tx,
+        plugin_runtime,
+    } = crate::runner::prepare(&component_bytes, &flags, true, true)?;
 
-    let mut store = Store::new(
-        &engine,
-        TuiHostState {
-            wasi: wasi.build(),
-            table: ResourceTable::new(),
-        },
-    );
-    // With epoch interruption on, an unset deadline is 0 — every tick traps.
-    // Give instantiation and the run a huge budget; the opt-in kill below
-    // replaces it right before the guest call. Async stores default the
-    // deadline handler to yield-and-extend; make deadlines trap instead.
+    // With epoch interruption on, an unset deadline is 0 — every tick
+    // traps. Give instantiation and the run a huge budget; the opt-in kill
+    // below replaces it right before the guest call. Async stores default
+    // the deadline handler to yield-and-extend; make deadlines trap
+    // instead (spike finding 1).
     store.epoch_deadline_trap();
     store.set_epoch_deadline(10_000_000_000);
 
-    let mut linker = Linker::new(&engine);
-    p3::add_to_linker::<TuiHostState>(&mut linker)?;
-    // The dart2wasm runtime's backtrace capture (wasm:dart/trace@1.0.0):
-    // render the wasm frames on the host's own stack, the same way the
-    // engine mode does.
-    {
-        let mut root = linker.root();
-        let mut trace = root.instance("wasm:dart/trace@1.0.0")?;
-        trace.func_wrap(
-            "capture-utf16",
-            |store: StoreContextMut<'_, TuiHostState>, _capacity: (u32,)| {
-                let backtrace = WasmBacktrace::force_capture(&store);
-                let frames: Vec<String> = backtrace
-                    .frames()
-                    .iter()
-                    .skip(3)
-                    .map(|frame| crate::runner::render_frame(frame))
-                    .collect();
-                let mut text = String::from("Uncaught\n");
-                for frame in frames {
-                    text.push_str("    at ");
-                    text.push_str(&frame);
-                    text.push('\n');
-                }
-                Ok((text,))
-            },
-        )?;
-    }
-    {
-        let mut root = linker.root();
-        let mut tty = root.instance("tina:term/tty@0.1.0")?;
-        tty.func_wrap(
-            "get-size",
-            |_store, _params: ()| -> Result<((u32, u32),)> {
-                Ok((window_size()?,))
-            },
-        )?;
-    }
+    // The epoch ticker must run from the very start: instantiation itself
+    // is interruptible, so a late ticker traps the guest before the first
+    // frame (spike finding 2).
+    let tick_engine: Engine = {
+        let tick = engine.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(10));
+            tick.increment_epoch();
+        });
+        engine
+    };
+
+    let mut linker = crate::runner::build_linker(&tick_engine, &plugin_runtime)?;
+    // The tty authority + the crash channel (tina:term): components that
+    // do not import tina:term never reach it.
+    crate::tina_term::add_to_linker(&mut linker)?;
 
     let instance = linker
         .instantiate_async(&mut store, &component)
         .await
         .map_err(|e| {
+            // A guest exception during instantiation routes through the
+            // crash channel before the WASI exit backstop: surface the
+            // recorded message with the failure (the parked-run select
+            // below is not armed yet).
+            if let Some(message) = store.data().crash.take() {
+                eprintln!("tui host: guest crashed during instantiation: {message}");
+            }
             eprintln!("tui host: instantiate failed: {e}");
             e
         })?;
@@ -234,11 +132,12 @@ pub async fn run_bytes(bytes: &[u8]) -> Result<()> {
     let run_fn = instance.get_func(&mut store, run_idx).unwrap();
 
     // Opt-in forced kill, two mechanisms:
-    // - TINA_TUI_EPOCH_TICKS: after this many ticks (10ms each) a guest that
-    //   wakes into the deadline traps — the epoch kill of a parked guest.
+    // - TINA_TUI_EPOCH_TICKS: after this many ticks (10ms each) a guest
+    //   that wakes into the deadline traps — the epoch kill of a parked
+    //   guest.
     // - TINA_TUI_KILL_MS: a host watchdog yanks the guest after this long
-    //   no matter what state it is in (also covers a guest task that died
-    //   without ever returning its result).
+    //   no matter what state it is in (covers a wedged guest that ignores
+    //   input; the crash channel covers the crash case structurally).
     let kill_ms: Option<u64> = env::var("TINA_TUI_KILL_MS")
         .ok()
         .and_then(|spec| spec.parse().ok());
@@ -255,20 +154,21 @@ pub async fn run_bytes(bytes: &[u8]) -> Result<()> {
         }
     }
 
-    // The watchdog cannot just drop the store: parked concurrent guest tasks
-    // make the drop a deadlock. Instead it injects Ctrl-C into the guest's
-    // stdin — the host owns the byte stream, so this is a host-initiated
-    // quit, and the guest still tears down cleanly.
+    // The watchdog cannot drop the store: parked concurrent guest tasks
+    // deadlock the drop. It injects Ctrl-C into the guest's stdin instead
+    // — the host owns the byte stream, so this is a host-initiated quit
+    // and the guest still tears down cleanly.
     if let Some(ms) = kill_ms {
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(ms)).await;
-            eprintln!("tui host: watchdog fired after {ms}ms; injecting Ctrl-C");
-            let _ = watchdog_tx
-                .send(bytes::Bytes::from_static(b"\x03"))
-                .await;
-        });
+        if let Some(tx) = stdin_tx.clone() {
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                eprintln!("tui host: watchdog fired after {ms}ms; injecting Ctrl-C");
+                let _ = tx.send(bytes::Bytes::from_static(b"\x03")).await;
+            });
+        }
     }
 
+    let crash = store.data().crash.clone();
     let body = store.run_concurrent(async |accessor| -> Result<()> {
         let mut results = [Val::Result(Ok(None))];
         run_fn.call_concurrent(accessor, &[], &mut results).await?;
@@ -279,28 +179,36 @@ pub async fn run_bytes(bytes: &[u8]) -> Result<()> {
         }
         Ok(())
     });
-    let outcome = body.await;
 
-    raw.restore();
-    match outcome {
-        // The run_concurrent result: the outer Result is the host-side call
-        // machinery; the inner one is the guest's `run` result (a trap or
-        // epoch kill lands here as Err).
-        //
-        // host-side call machinery; the inner one is the guest's `run`
-        // result (a trap/epoch kill lands here as Err).
-        Ok(Ok(())) => {
-            eprintln!("tui host: guest run() returned cleanly; terminal restored");
-            Ok(())
+    // The crash channel (spike finding 4): select the parked run against
+    // the guest's zone-guard `crash.fail` signal, so a guest Dart
+    // exception surfaces as a host error instead of parking forever.
+    tokio::select! {
+        outcome = body => {
+            raw.restore();
+            match outcome {
+                // The outer Result is the host-side call machinery; the
+                // guest's `run` result is unit, so a trap or epoch kill
+                // lands as the inner Err.
+                Ok(Ok(())) => {
+                    eprintln!(
+                        "tui host: guest run() returned cleanly; terminal restored"
+                    );
+                    Ok(())
+                }
+                Ok(Err(guest)) => {
+                    eprintln!("tui host: guest run() FAILED ({guest}); terminal restored");
+                    std::process::exit(3);
+                }
+                Err(host) => {
+                    eprintln!("tui host: guest call failed ({host}); terminal restored");
+                    std::process::exit(3);
+                }
+            }
         }
-        Ok(Err(guest)) => {
-            eprintln!("tui host: guest run() FAILED ({guest}); terminal restored");
-            // Distinct exit code for the demo, only after the terminal is
-            // back in cooked mode.
-            std::process::exit(3);
-        }
-        Err(host) => {
-            eprintln!("tui host: guest call failed ({host}); terminal restored");
+        message = crash.wait() => {
+            raw.restore();
+            eprintln!("tui host: guest crashed: {message}; terminal restored");
             std::process::exit(3);
         }
     }
