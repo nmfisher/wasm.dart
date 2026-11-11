@@ -2,12 +2,19 @@
 // (`tina_core.ProcessPort`) served by the host, because WASI has no
 // process spawn. Spec: docs/tina_process.md.
 //
-// The access profile travels with every request; the host evaluates it
-// before any process exists and is the only side that can spawn. An
-// `ask` verdict returns to the engine as an approval request it answers
-// with `respond` - the host cannot call back into a blocked guest.
+// The host enforces the capability document it was launched with
+// (`docs/capability_merger.md`): the command rules are host-held, so an
+// engine compiled from a different policy cannot widen itself by editing
+// what travels with the request. A request may still carry an access
+// profile as a fail-closed backstop assertion: deny beats ask beats
+// allow. An `ask` verdict returns to the engine as an approval request it
+// answers with `respond` - the host cannot call back into a blocked
+// guest.
+//
+// 1.1.0: the per-request profile became optional (the host-held capability
+// rules are the authority); the verdict semantics are unchanged.
 
-package tina:process@1.0.0;
+package tina:process@1.1.0;
 
 interface types {
     /// How one command-pattern rule judges a command line.
@@ -25,7 +32,9 @@ interface types {
         verdict: verdict,
     }
 
-    /// The policy table the engine sends with every spawn.
+    /// The optional backstop the engine sends with a spawn. The host-held
+    /// capability rules are the authority; this profile, when present, can
+    /// only tighten the verdict (fail-closed union).
     record access-profile {
         rules: list<rule>,
     }
@@ -38,7 +47,7 @@ interface types {
         cwd: option<string>,
         env: list<tuple<string, string>>,
         stdin: option<list<u8>>,
-        profile: access-profile,
+        profile: option<access-profile>,
     }
 
     /// A child the host started: the id `wait`/`kill` address, plus the
@@ -81,9 +90,10 @@ interface types {
 interface process {
     use types.{spawn-request, outcome, exit, error};
 
-    /// Ask the host to run `req`. The profile is evaluated first: allow
-    /// starts the child, deny refuses with the rule, ask (or no match)
-    /// returns an approval request the engine must answer.
+    /// Ask the host to run `req`. The host evaluates its capability rules
+    /// (and the optional backstop profile) before any process exists:
+    /// allow starts the child, deny refuses with the rule, ask (or no
+    /// match) returns an approval request the engine must answer.
     spawn: async func(req: spawn-request) -> result<outcome, error>;
 
     /// Answer an approval request. `allow` spawns now and reports

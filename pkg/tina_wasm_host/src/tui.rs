@@ -9,7 +9,7 @@
 //! `get-size` with the live window (so the guest's poll sees resizes), and
 //! restores the terminal when `run` returns cleanly, when it traps, and when
 //! an epoch deadline kills a parked guest (`TINA_TUI_EPOCH_TICKS`).
-use std::{env, fs, io::Read as _, time::Duration};
+use std::{env, io::Read as _, time::Duration};
 
 use wasmtime::{
     Config,
@@ -19,7 +19,6 @@ use wasmtime::{
     Result,
     Store,
     component::{Component, Linker, Val},
-    error::Context as _,
 };
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p3, cli::AsyncStdinStream};
 
@@ -103,7 +102,11 @@ impl Drop for RawMode {
 
 /// Run the TUI component over the real terminal. Returns once the guest's
 /// `run` export completes (or fails); the terminal is always restored first.
-pub async fn run(component_path: &str) -> Result<()> {
+/// Spike scope retained through the production rewire: the guest imports
+/// only WASI + `tina:term/tty` here; the production TUI guest's tina host
+/// imports, discovery preopens and failure channel are the implementation
+/// milestone (`docs/wasm_tui.md`).
+pub async fn run_bytes(bytes: &[u8]) -> Result<()> {
     let mut config = Config::default();
     config.wasm_gc(true);
     config.wasm_function_references(true);
@@ -127,15 +130,13 @@ pub async fn run(component_path: &str) -> Result<()> {
         });
     }
 
-    let bytes = fs::read(component_path)
-        .with_context(|| format!("Reading TUI component {component_path}"))?;
     let component = Component::new(&engine, &bytes)?;
 
     // Raw mode before the stdin pump starts: the pump must see raw bytes.
     let mut raw = RawMode::enable()?;
     let (cols, rows) = window_size()?;
 
-    let stdout = crate::TrackedStdout::default();
+    let stdout = crate::runner::TrackedStdout::default();
     let mut wasi = WasiCtxBuilder::new();
     wasi.stdout(stdout.clone());
     // The initial size also rides the environment (the tty import stays the
@@ -162,7 +163,7 @@ pub async fn run(component_path: &str) -> Result<()> {
             }
         }
     });
-    wasi.stdin(AsyncStdinStream::new(crate::ChannelReader { receiver: rx }));
+    wasi.stdin(AsyncStdinStream::new(crate::runner::ChannelReader { receiver: rx }));
 
     let mut store = Store::new(
         &engine,
@@ -194,7 +195,7 @@ pub async fn run(component_path: &str) -> Result<()> {
                     .frames()
                     .iter()
                     .skip(3)
-                    .map(|frame| crate::render_frame(frame))
+                    .map(|frame| crate::runner::render_frame(frame))
                     .collect();
                 let mut text = String::from("Uncaught\n");
                 for frame in frames {

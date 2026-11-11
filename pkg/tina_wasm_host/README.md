@@ -32,12 +32,36 @@ implementation.
 
 ## Runner arguments
 
+The packaged host is **embedded-only**: the engine component is compiled
+into the binary (`TINA_WASM_HOST_ENGINE=<component>` at build time) and
+there is no `--engine` flag and no positional engine path — engine
+updates require rebuilding the host (`TINA_WASM_HOST_ENGINE=<engine.wasm>
+cargo build -p tina-wasm-host`, about 2 minutes incremental). The
+repository's case suite runs its components under `tina-case-runner`,
+which keeps the old positional-component surface:
+
 ```
-tina-wasm-host file.wasm [--preopen=guest_dir=host_dir]... [--env=NAME=VALUE]...
+tina-wasm-host                                       # default discovery
+tina-wasm-host [--capabilities=doc.json | --preopen=g=h]... [--env=NAME=VALUE]...
+tina-case-runner <component.wasm> [--preopen=g=h]... [--env=NAME=VALUE]... [--no-stdin]
 ```
 
+**Default discovery** (no `--capabilities`, no `--preopen`): boot a
+working session like native tina — the current directory is the
+read-write workspace, the user's `~/.tina/config` is the settings tree,
+preopened read-only with symlinks resolved. With no tina config the host
+fails with a friendly message pointing at the path (`run tina once to
+create one, or pass --preopen=config=<dir>`). The flags only fill in
+what is missing.
+
 `--preopen` exposes a host directory inside the guest as a WASI preopen
-(read-write); `--env` sets a WASI environment variable. The case suite
-passes neither, so its runs are unchanged; the tina probes use them for
-their workspace and provider configuration (credentials always arrive
-through `--env` from the caller's environment, never from a file).
+(read-write, yesterday's surface, still fully supported); `--env` sets a
+WASI environment variable. `--capabilities` replaces the flag surface
+with the engine's compiled capability document (see
+`docs/capability_merger.md`): the host validates it fail-closed, derives
+the preopen set from its directory grants (write grants rw, read grants
+ro), enforces its command rules at `tina:process`, its network domain
+allowlist at `tina:http`, its plugin grants at plugin admission, and
+accepts `tina:policy.widen` escalations from the engine. Credentials
+always arrive through `--env` from the caller's environment, never from
+a file.
