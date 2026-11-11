@@ -75,6 +75,25 @@ pub fn discover_config_mount(home: &std::path::Path) -> Result<std::path::PathBu
             std::fs::Permissions::from_mode(0o600),
         );
     }
+    // The provider descriptor catalog augments itself from the models.dev
+    // cache ($HOME/.tina/cache/models.dev.providers.json); without it,
+    // config providers that rely on the catalog for their endpoint lose
+    // their descriptor and the engine refuses them at boot. Carry it
+    // verbatim when present (public model metadata, never credentials);
+    // absent cache = absent entry, the builtin-only catalog.
+    let cache = home.join(".tina").join("cache").join("models.dev.providers.json");
+    if let Ok(cache_meta) = std::fs::metadata(&cache) {
+        if cache_meta.is_file() {
+            let cache_dir = mount.join(".tina").join("cache");
+            std::fs::create_dir_all(&cache_dir).map_err(|e| {
+                format!("could not create {}: {e}", cache_dir.display())
+            })?;
+            std::fs::copy(&cache, cache_dir.join("models.dev.providers.json"))
+                .map_err(|e| {
+                    format!("could not snapshot {}: {e}", cache.display())
+                })?;
+        }
+    }
     Ok(mount)
 }
 
@@ -254,6 +273,14 @@ pub async fn run_guest(component_bytes: Vec<u8>, flags: GuestFlags) -> Result<()
                 .map_err(|_| wasmtime::Error::msg("no HOME set; pass --preopen=config=<dir>".to_string()))?;
             let mount = discover_config_mount(std::path::Path::new(&home))
                 .map_err(wasmtime::Error::msg)?;
+            // The provider catalog augments itself from the models.dev
+            // cache under $HOME/.tina/cache (configuredDescriptors reads
+            // env('HOME'), and the guest's home path is the config
+            // preopen root 'config'). Point HOME at it unless the caller
+            // set their own.
+            if !flags.env.iter().any(|(name, _)| name == "HOME") {
+                wasi.env("HOME", "config");
+            }
             policy::CapabilityPolicy::from_default_discovery(&workspace, &mount)
         }
     };
@@ -1029,6 +1056,41 @@ mod discovery_tests {
         assert_eq!(mounted, "version = 2\n", "the resolved contents are mounted");
         std::fs::remove_dir_all(&home).ok();
         std::fs::remove_dir_all(&elsewhere).ok();
+    }
+
+    #[test]
+    fn the_models_dev_cache_is_carried_verbatim_when_present() {
+        let home = fixture("cache");
+        std::fs::create_dir_all(home.join(".tina").join("cache")).unwrap();
+        std::fs::write(home.join(".tina").join("config"), "version = 1\n").unwrap();
+        let cache_body = r#"\"zai-coding-plan\": {\"npm\": \"@ai-sdk/openai-compatible\"}"#;
+        std::fs::write(
+            home.join(".tina").join("cache").join("models.dev.providers.json"),
+            format!("{{{cache_body}}}"),
+        )
+        .unwrap();
+
+        let mount = discover_config_mount(&home).expect("resolves");
+        let carried = std::fs::read_to_string(
+            mount.join(".tina").join("cache").join("models.dev.providers.json"),
+        )
+        .expect("the cache is carried into the snapshot");
+        assert_eq!(carried, format!("{{{cache_body}}}"), "verbatim bytes");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn an_absent_cache_is_absent_from_the_snapshot() {
+        let home = fixture("nocache");
+        std::fs::create_dir_all(home.join(".tina")).unwrap();
+        std::fs::write(home.join(".tina").join("config"), "version = 1\n").unwrap();
+
+        let mount = discover_config_mount(&home).expect("resolves");
+        assert!(
+            !mount.join(".tina").exists(),
+            "no cache means no .tina subtree in the snapshot"
+        );
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
