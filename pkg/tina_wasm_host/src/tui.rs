@@ -197,11 +197,29 @@ pub async fn run_bytes(component_bytes: Vec<u8>, flags: crate::runner::GuestFlag
                     Ok(())
                 }
                 Ok(Err(guest)) => {
-                    eprintln!("tui host: guest run() FAILED ({guest}); terminal restored");
+                    // The guest's zone guard calls `crash.fail` BEFORE the
+                    // WASI exit backstop, but the backstop trap can resolve
+                    // the body in the same poll cycle and win the select.
+                    // The recorded message must still surface (milestone-3
+                    // failure-channel leg): check the crash slot before
+                    // reporting the bare trap.
+                    if let Some(message) = store.data().crash.take() {
+                        eprintln!("tui host: guest crashed: {message}; terminal restored");
+                    } else {
+                        eprintln!("tui host: guest run() FAILED ({guest}); terminal restored");
+                    }
                     std::process::exit(3);
                 }
                 Err(host) => {
-                    eprintln!("tui host: guest call failed ({host}); terminal restored");
+                    // Same race as the `Ok(Err)` arm: the zone guard's
+                    // crash.fail precedes the exit-backstop trap, but the
+                    // trap can win the select. Surface the recorded message
+                    // when it is present (milestone-3 failure-channel leg).
+                    if let Some(message) = store.data().crash.take() {
+                        eprintln!("tui host: guest crashed: {message}; terminal restored");
+                    } else {
+                        eprintln!("tui host: guest call failed ({host}); terminal restored");
+                    }
                     std::process::exit(3);
                 }
             }
