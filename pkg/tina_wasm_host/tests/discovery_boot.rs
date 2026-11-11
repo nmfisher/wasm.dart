@@ -150,3 +150,88 @@ fn bare_discovery_without_a_config_fails_with_the_friendly_message() {
     std::fs::remove_dir_all(&home).ok();
     std::fs::remove_dir_all(&workspace).ok();
 }
+
+/// A config with multiple custom providers (each carrying its own
+/// base_url) must boot: the snapshot carries the config bytes verbatim,
+/// so every custom provider table survives assembly.
+#[test]
+fn multiple_custom_providers_in_the_config_boot_to_ready() {
+    let Some(runner) = runner() else {
+        eprintln!("skipping: TINA_DISCOVERY_RUNNER is not set");
+        return;
+    };
+    let home = fixture("custom-providers");
+    std::fs::create_dir_all(home.join(".tina")).expect("config dir");
+    std::fs::write(
+        home.join(".tina").join("config"),
+        r#"version = 1
+
+[default]
+model = "custom-a/first-model"
+
+[providers.custom-a]
+base_url = "https://custom-a.example/api"
+api_key = "placeholder-a"
+models = ["first-model|First Model"]
+
+[providers.custom-b]
+base_url = "https://custom-b.example/api"
+api_key = "placeholder-b"
+models = ["second-model|Second Model", "third-model"]
+"#,
+    )
+    .expect("config file");
+    let workspace = fixture("workspace3");
+
+    assert_boots_to_ready(&home, &workspace);
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&workspace).ok();
+}
+
+/// The orchestrator's repro shape: the config references a provider that
+/// is NOT builtin and carries NO base_url - its endpoint comes from the
+/// models.dev descriptor catalog. The snapshot must carry the cache (and
+/// point the guest's HOME at the config mount) or the engine refuses the
+/// provider at boot ("base_url is required for a custom provider").
+#[test]
+fn a_catalog_backed_provider_without_base_url_boots_to_ready() {
+    let Some(runner) = runner() else {
+        eprintln!("skipping: TINA_DISCOVERY_RUNNER is not set");
+        return;
+    };
+    let home = fixture("catalog-provider");
+    std::fs::create_dir_all(home.join(".tina").join("cache")).expect("cache dir");
+    std::fs::write(
+        home.join(".tina").join("config"),
+        r#"version = 1
+
+[default]
+model = "zai-coding-plan/glm-4.6"
+"#,
+    )
+    .expect("config file");
+    // Public models.dev-style cache row (never credentials).
+    std::fs::write(
+        home
+            .join(".tina")
+            .join("cache")
+            .join("models.dev.providers.json"),
+        r#"{
+  "zai-coding-plan": {
+    "npm": "@ai-sdk/openai-compatible",
+    "api": "https://api.z.ai/api/coding-plan",
+    "name": "Z.ai Coding Plan",
+    "env": ["ZAI_CODING_PLAN_API_KEY"],
+    "models": {
+      "glm-4.6": {"name": "GLM-4.6"}
+    }
+  }
+}"#,
+    )
+    .expect("cache file");
+    let workspace = fixture("workspace4");
+
+    assert_boots_to_ready(&home, &workspace);
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&workspace).ok();
+}
