@@ -34,6 +34,10 @@ const slowCaseTimeouts = <String, Timeout>{
   // `double` on either runner generation, measured); the 30s default
   // predates the slow-case budget and `double` just misses it.
   'double': Timeout(Duration(seconds: 90)),
+  // The SIMD kernel: 6 x 200k Float32x4 multiply-add rounds run ~43s on
+  // the debug runner (measured; rounds slow ~1.13x each as the
+  // boxed-Float32x4 heap grows), plus ~15s JIT warmup.
+  'bench_kernel': Timeout(Duration(minutes: 3)),
   'double_parse_rounding': Timeout(Duration(minutes: 5)),
   'double_parse_rounding_bits': Timeout(Duration(seconds: 90)),
 };
