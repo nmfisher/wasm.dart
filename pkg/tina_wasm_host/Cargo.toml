@@ -6,6 +6,9 @@ edition = "2024"
 [dependencies]
 serde = "1.0.228"
 serde_json = { version = "1.0.150", features = ["raw_value"] }
+# The discovery-time credential lift parses the user's tina config (the
+# same TOML crate wasmtime already pulls, so the lock does not fork).
+toml = "0.9"
 wasmtime = { version = "47.0.2", features = ["cache"] }
 wasmtime-wasi = { version = "47.0.2", features = ["p3"] }
 tokio = { version = "1", features = ["rt", "process", "io-util", "io-std", "time", "macros"] }
