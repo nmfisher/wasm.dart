@@ -114,22 +114,31 @@ final class ModuleTransformer {
     }
 
     // The timeline replacer has one duty the loop above cannot reach: the
-    // embedder's `component.implicitImport_timelineReportTaskEvent` import
-    // is declared in every module (its source is always compiled in), but
-    // when dart2wasm's DCE removed both `dart.*` timeline imports there is
-    // no `dart.*` import left to run the replacer with. Decide on the
-    // embedder's behalf: with the SDK entries present the dependency was
-    // registered above; without them the declared import is rewired to a
-    // stub so the component stays free of an unused host dependency.
+    // embedder's `component.implicitImport_timelineReportTaskEvent` import,
+    // when dart2wasm declares it, but when dart2wasm's DCE removed both
+    // `dart.*` timeline imports there is no `dart.*` import left to run the
+    // replacer with. Decide on the embedder's behalf: with the SDK entries
+    // present the dependency was registered above; without them a declared
+    // import is rewired to a stub so the component stays free of an unused
+    // host dependency.
     const timelineReplacer = _TimelineImports();
     if (!_ComponentImport.functionUsed(this, 'timelineStreamEnabled') &&
         !_ComponentImport.functionUsed(this, 'reportTaskEvent')) {
-      final declared = module.imports.functions.firstWhere(
-        (import) =>
-            import.module == 'component' &&
-            import.name == 'implicitImport_timelineReportTaskEvent',
-      );
-      timelineReplacer._stubTimelineReport(this, declared);
+      // dart2wasm DCEs the declared
+      // `component.implicitImport_timelineReportTaskEvent` import itself
+      // when the timeline is unused (observed on stable 3.14.0; the older
+      // edge pin always declared it). Tolerate the missing import by
+      // skipping the stub: the ABI-declared host import stays unused.
+      final declared = module.imports.functions
+          .where(
+            (import) =>
+                import.module == 'component' &&
+                import.name == 'implicitImport_timelineReportTaskEvent',
+          )
+          .toList();
+      if (declared.isNotEmpty) {
+        timelineReplacer._stubTimelineReport(this, declared.single);
+      }
     }
 
     final unusedComponentImports = {
