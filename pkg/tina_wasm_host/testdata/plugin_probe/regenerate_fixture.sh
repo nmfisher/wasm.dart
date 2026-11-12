@@ -9,13 +9,13 @@ repo=$(cd "$1" && pwd)
 fixture=$(cd "$(dirname "$0")" && pwd)
 output_dir=$(mkdir -p "$(dirname "$2")" && cd "$(dirname "$2")" && pwd)
 output="$output_dir/$(basename "$2")"
-sdk=${DART_SDK:-/home/agent/tools/dart-sdk-src/sdk/out/ReleaseX64/dart-sdk}
+sdk=${DART_SDK:-/home/agent/tools/dart-sdk-3.14.0-stable}
 if [[ ! -x "$sdk/bin/dart" || ! -x "$sdk/bin/dartaotruntime" ]]; then
   echo "pinned Dart 3.14 SDK not found at $sdk" >&2
   exit 1
 fi
 sdk_version=$("$sdk/bin/dart" --version 2>&1)
-if [[ "$sdk_version" != *"3.14.0-edge.e7112ac2438cd4f5ac0c832c27ce75bb10b02420"* ]]; then
+if [[ "$sdk_version" != *"3.14.0"* ]]; then
   echo "wrong Dart SDK: $sdk_version" >&2
   exit 1
 fi

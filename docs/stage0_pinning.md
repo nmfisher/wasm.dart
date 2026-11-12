@@ -8,8 +8,8 @@ Verified on 2026-11-07 on this container (`/workspace`, branch
 
 | What | Pin | Notes |
 |---|---|---|
-| Dart SDK | `3.14.0-edge.e7112ac2438cd4f5ac0c832c27ce75bb10b02420` (channel: `main`/edge) | Source-built in this container at `/home/agent/dart-sdk-src/sdk`, out dir `out/ReleaseX64` |
-| SDK commit | `e7112ac2438cd4f5ac0c832c27ce75bb10b02420` (2026-09-25, *"Report undocumented declaring parameters in `public_member_api_docs`"*) | The commit the lineage branch's suite was run against (`SDK_SUITE_REPORT.md`) |
+| Dart SDK | `3.14.0` (channel: `stable`) | Installed at `/home/agent/tools/dart-sdk-3.14.0-stable`. **Pin move 2026-11-12**: moved from the source-built edge `3.14.0-edge.e7112ac…` to released stable 3.14.0 after the stable-SDK validation spike — engine, TUI and fixture rebuilt on stable, boot + scripted-turn and the full component/parity suites green (the two wasm_tools patches the move needed, the vendored wasm_builder SIMD opcode table and the timeline-import DCE tolerance, are landed on this branch). The edge checkout stays at `/home/agent/tools/dart-sdk-src` as the documented fallback; the edge build sections below remain the record of how it was produced. |
+| SDK commit | `e7112ac2438cd4f5ac0c832c27ce75bb10b02420` (2026-09-25, *"Report undocumented declaring parameters in `public_member_api_docs`"*) | The edge fallback's exact revision; the lineage branch's suite ran against it (`SDK_SUITE_REPORT.md`) |
 | Embedder surface | 82 external functions in `sdk/lib/_internal/wasm/standalone/embedder.dart` | Byte-identical across `3.13.7` stable, the pinned edge build and `3.14.0-315.3.beta`; **differs** in `3.15.0-118.1.beta` (nullable annotations dropped from `WasmExternRef` params) |
 | wasm.dart (this repo) | branch `asb/wasm-stage0-sdk-pin` @ `e7506b3` | Cut from lineage tip `rebase/dart-imports-sdk314` @ `e7506b3` |
 | wasm.dart upstream | `simolus3/wasm.dart` main @ `29c9ce0` (*"Fix publishing autoation"*, 2026-10-25) | Merge-base of this lineage and upstream main is `de041ee` (*"A few more string functions"*); upstream main carries the same feature work as this fork's PR stack |
@@ -34,14 +34,18 @@ lineage branch's tests exercise*.
   Because wasm_tools requires SDK version ^3.14.0-251.0.dev, version solving failed.
   ```
 
-  So no stable SDK can even resolve this workspace; the pin cannot be stable.
+  At original pin time that meant no stable SDK could resolve the workspace
+  (newest stable was 3.13.7). **Superseded 2026-11-12**: released stable
+  `3.14.0` satisfies `^3.14.0-251.0.dev`, resolves the workspace, and is the
+  pin after the validated move recorded in the pins table above.
 - The lineage name `rebase/dart-imports-sdk314` is accurate: the suite the
   lineage ran (`SDK_SUITE_REPORT.md`) used exactly
   `3.14.0-edge.e7112ac2438cd4f5ac0c832c27ce75bb10b02420 (main)`, source-built.
   The workspace constraint `^3.14.0-251.0.dev` exists because
   `3.14.0-251.0.dev` (commit `de942dbb`) is where dart2wasm switched to
   `try_table`/`throw_ref`, which is what makes components runnable under
-  Wasmtime (README note). Anything ≥ that and < 3.15 satisfies the constraint.
+  Wasmtime (README note). Anything ≥ that and < 3.15 satisfies the constraint;
+  released stable `3.14.0` does.
 - `3.14.0-315.3.beta` also has a byte-identical embedder surface (82 externals)
   and would satisfy the constraint; it is a valid drop-in alternative recorded
   here, but the pin is the edge build the suite actually exercised.
