@@ -4723,7 +4723,7 @@ enum V128Instruction with Instruction {
   const V128Instruction(this.opcode, this.name);
 
   static List<V128Instruction?> _lookup = (() {
-    final lookup = List<V128Instruction?>.filled(256, null);
+    final lookup = List<V128Instruction?>.filled(280, null);
     for (final v in values) {
       lookup[v.opcode] = v;
     }
