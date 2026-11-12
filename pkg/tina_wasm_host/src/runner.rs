@@ -97,6 +97,40 @@ pub fn discover_config_mount(home: &std::path::Path) -> Result<std::path::PathBu
     Ok(mount)
 }
 
+/// Lifts the inline provider credential from a tina config's text: the
+/// `[providers.<name>].api_key` of the provider the config's `[default]`
+/// selects (via an explicit `provider`, or derived from the model's
+/// `publisher/name` prefix). Returns None when the config parses but
+/// carries no usable key.
+///
+/// Used by default discovery so a config with an INLINE api_key (the
+/// native-tina pattern) works in the sandbox: native tina reads this key
+/// from the same file, but the guest's provider auth resolves
+/// environment variables only. The token lives in host memory and the
+/// guest env: never written to the snapshot dir, never logged.
+fn inline_provider_token(config_text: &str) -> Option<String> {
+    let value: toml::Value = toml::from_str(config_text).ok()?;
+    let default = value.get("default")?;
+    let provider = default
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            default
+                .get("model")
+                .and_then(|v| v.as_str())
+                .and_then(|model| model.split('/').next())
+                .map(str::to_string)
+        })?;
+    let key = value
+        .get("providers")?
+        .get(&provider)?
+        .get("api_key")?
+        .as_str()?;
+    let trimmed = key.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 /// The session flags both entry points accept: the capability document,
 /// legacy preopens/env, and the plugin surface. There is no engine
 /// selection: the packaged host runs the engine compiled into it, and
@@ -325,6 +359,19 @@ pub(crate) fn prepare(
             // set their own.
             if !flags.env.iter().any(|(name, _)| name == "HOME") {
                 wasi.env("HOME", "config");
+            }
+            // Inline provider credentials (see inline_provider_token):
+            // native tina reads api_key from the config file, the guest's
+            // provider auth reads the environment, so discovery lifts the
+            // config key into the guest env. A caller-provided
+            // TINA_LLM_TOKEN wins; the token is never written to the
+            // snapshot dir and never logged.
+            if !flags.env.iter().any(|(name, _)| name == "TINA_LLM_TOKEN") {
+                if let Ok(config_text) = fs::read_to_string(mount.join("config")) {
+                    if let Some(token) = inline_provider_token(&config_text) {
+                        wasi.env("TINA_LLM_TOKEN", &token);
+                    }
+                }
             }
             policy::CapabilityPolicy::from_default_discovery(&workspace, &mount)
         }
@@ -1094,6 +1141,77 @@ mod tests {
 #[cfg(test)]
 mod discovery_tests {
     use super::discover_config_mount;
+    use super::inline_provider_token;
+
+    #[test]
+    fn inline_key_under_default_provider_table() {
+        let config = r#"version = 1
+
+[default]
+provider = "zai-coding-plan"
+model = "zai-coding-plan/glm-4.6"
+
+[providers.zai-coding-plan]
+api_key = "sk-inline-real"
+"#;
+        assert_eq!(
+            inline_provider_token(config).as_deref(),
+            Some("sk-inline-real")
+        );
+    }
+
+    #[test]
+    fn inline_key_derived_from_model_prefix() {
+        let config = r#"version = 1
+
+[default]
+model = "anthropic/claude-sonnet-4-6"
+
+[providers.anthropic]
+api_key = "sk-from-prefix"
+"#;
+        assert_eq!(
+            inline_provider_token(config).as_deref(),
+            Some("sk-from-prefix")
+        );
+    }
+
+    #[test]
+    fn no_inline_key_is_none() {
+        let config = r#"version = 1
+
+[default]
+model = "anthropic/claude-sonnet-4-6"
+"#;
+        assert_eq!(inline_provider_token(config), None);
+    }
+
+    #[test]
+    fn empty_inline_key_is_none() {
+        let config = r#"[default]
+provider = "x"
+
+[providers.x]
+api_key = ""
+"#;
+        assert_eq!(inline_provider_token(config), None);
+    }
+
+    #[test]
+    fn unparsable_config_is_none() {
+        assert_eq!(inline_provider_token("not toml at all ]]"), None);
+    }
+
+    #[test]
+    fn unknown_provider_table_is_none() {
+        let config = r#"[default]
+provider = "zai"
+
+[providers.other]
+api_key = "sk-someone-elses"
+"#;
+        assert_eq!(inline_provider_token(config), None);
+    }
 
     fn fixture(label: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
