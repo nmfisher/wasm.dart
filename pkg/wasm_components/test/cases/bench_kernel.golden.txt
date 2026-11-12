@@ -1,0 +1,4 @@
+{"type":"start","test":0}
+{"type":"bool","value":true}
+ok 1.000000
+{"type":"end","test":0}
