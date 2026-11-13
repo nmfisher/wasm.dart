@@ -59,6 +59,19 @@ pub fn component_config(epoch: bool) -> Config {
         // Compile-visible: epoch checks are emitted into the code.
         config.epoch_interruption(true);
     }
+    // The dart2wasm guest's object heap lives in the wasm-GC heap. Its
+    // reservation defaults follow the LINEAR-MEMORY tunables, whose
+    // platform heuristics under-provisioned it on macOS arm64: the
+    // models.dev cache parses into ~27 MB of Dart objects and boot died
+    // with "GC heap out of memory: no capacity for allocation of
+    // 26,691,124 bytes" inside PreloadedAppIo.load - while the same data
+    // boots on linux x64. Reservations are virtual address space only
+    // (lazily committed), so generous values cost nothing at runtime.
+    // Note wasmtime's coupling rule: setting ANY gc_heap_* tunable makes
+    // the others stop following memory_* defaults, so set all three.
+    config.gc_heap_reservation(8 << 30);
+    config.gc_heap_reservation_for_growth(4 << 30);
+    config.gc_heap_may_move(true);
     if let Some(triple) = explicit_triple() {
         if let Err(error) = config.target(triple) {
             panic!("unsupported wasmtime target triple {triple}: {error}");
