@@ -349,6 +349,13 @@ function runCase(dartFile, wasmFile) {
 
   const component = {
     'canon.context.get_i32_0': () => 0,
+    // dart2wasm always declares the timeline implicit import in standalone
+    // modules (the embedder glue is compiled in even when the timeline is
+    // unused; on Dart 3.14 stable the declaration is always present). The
+    // raw-module harness has no timeline sink to feed, and the cases record
+    // their assertions through the collector, so a no-op satisfies the
+    // import without changing any observable behavior.
+    implicitImport_timelineReportTaskEvent: () => {},
     // The generated bindings lower the collector functions in the order the
     // host world declares them (see `wasmdart_tests_root.json`):
     // record-string, record-optional-string, record-string-list,
