@@ -2,155 +2,192 @@ import 'package:test_runner/test_runner.dart';
 
 void main() {
   defineTests(const [
-    _hasMatch,
-    _firstMatch,
-    _matchAsPrefix,
-    _allMatches,
-    _groups,
-    _backreferences,
-    _flags,
+    _basics,
+    _compileErrors,
     _escape,
-    _invalidPattern,
-    _replaceAll,
-    _characterClassesAndEscapes,
+    _anchors,
+    _charClasses,
+    _quantifiers,
+    _alternation,
+    _groups,
+    _namedGroups,
+    _backreferences,
+    _lookarounds,
+    _flags,
+    _matchAsPrefix,
+    _replaceAllRegExp,
+    _stringMatchIterator,
   ]);
 }
 
-void _recordMatch(BaseResultCollector collector, Match? match) {
-  if (match == null) {
-    collector.recordOptionalString(e: null);
-    return;
+RegExp _rx(String source, {bool m = false, bool i = false, bool s = false, bool u = false}) =>
+    RegExp(source, multiLine: m, caseSensitive: !i, unicode: u, dotAll: s);
+
+void _basics(BaseResultCollector collector) {
+  collector.recordBool(e: RegExp('a').hasMatch('abc'));
+  collector.recordBool(e: RegExp('z').hasMatch('abc'));
+  collector.recordString(e: RegExp('a+b').firstMatch('caabd')![0]!);
+  collector.recordInt(e: RegExp('a+b').firstMatch('caabd')!.start);
+  collector.recordInt(e: RegExp('a+b').firstMatch('caabd')!.end);
+  collector.recordInt(e: RegExp('a+b').firstMatch('caabd')!.groupCount);
+}
+
+void _compileErrors(BaseResultCollector collector) {
+  // Compile errors surface as FormatException('Illegal RegExp pattern (...)').
+  try {
+    // ignore: valid_regexps
+    RegExp('(');
+    collector.recordBool(e: false);
+  } on FormatException {
+    collector.recordBool(e: true);
   }
-
-  collector.recordInt(e: match.start);
-  collector.recordInt(e: match.end);
-  collector.recordInt(e: match.groupCount);
-  for (var i = 0; i <= match.groupCount; i++) {
-    collector.recordOptionalString(e: match.group(i));
+  try {
+    // ignore: valid_regexps
+    RegExp('a\\');
+    collector.recordBool(e: false);
+  } on FormatException {
+    collector.recordBool(e: true);
   }
-}
-
-void _hasMatch(BaseResultCollector collector) {
-  collector.recordBool(e: RegExp('b+').hasMatch('abbbc'));
-  collector.recordBool(e: RegExp('d').hasMatch('abbbc'));
-  collector.recordBool(e: RegExp('').hasMatch(''));
-}
-
-void _firstMatch(BaseResultCollector collector) {
-  _recordMatch(collector, RegExp('b+').firstMatch('abbbc'));
-  _recordMatch(collector, RegExp('b+?').firstMatch('abbbc'));
-  _recordMatch(collector, RegExp('x|b').firstMatch('abbbc'));
-  _recordMatch(collector, RegExp('d').firstMatch('abbbc'));
-  _recordMatch(collector, RegExp(r'c$').firstMatch('abbbc'));
-  collector.recordOptionalString(e: RegExp('a.*c').stringMatch('xxabcbcx'));
-}
-
-void _matchAsPrefix(BaseResultCollector collector) {
-  final regexp = RegExp('b+');
-  _recordMatch(collector, regexp.matchAsPrefix('abbbc'));
-  _recordMatch(collector, regexp.matchAsPrefix('abbbc', 1));
-  _recordMatch(collector, regexp.matchAsPrefix('abbbc', 2));
-}
-
-void _allMatches(BaseResultCollector collector) {
-  collector.recordStringList(
-    e: [for (final match in RegExp('a+').allMatches('aabaaab')) match[0]!],
-  );
-  collector.recordStringList(
-    e: [
-      for (final match in RegExp('a*').allMatches('baac'))
-        '${match.start}-${match.end}',
-    ],
-  );
-  collector.recordStringList(
-    e: [
-      for (final match in RegExp('^a', multiLine: true).allMatches('ab\nac'))
-        '${match.start}',
-    ],
-  );
-}
-
-void _groups(BaseResultCollector collector) {
-  _recordMatch(collector, RegExp('(a)(b)?(c)').firstMatch('xacx'));
-  _recordMatch(collector, RegExp('(a(b))c').firstMatch('abc'));
-  _recordMatch(collector, RegExp('(?:(a)|b)+').firstMatch('ab'));
-  _recordMatch(collector, RegExp('(a|b)*').firstMatch('abba'));
-  _recordMatch(
-    collector,
-    RegExp('(z)((a+)?(b+)?(c))*').firstMatch('zaacbbbcac'),
-  );
-
-  final match = RegExp('(a)').firstMatch('a') as RegExpMatch;
-  collector.recordStringList(e: match.groupNames.toList());
-}
-
-void _backreferences(BaseResultCollector collector) {
-  _recordMatch(collector, RegExp(r'(.)\1').firstMatch('abccd'));
-  _recordMatch(collector, RegExp(r'(a+)b\1').firstMatch('aaabaa'));
-  _recordMatch(collector, RegExp(r'\1(a)').firstMatch('a'));
-}
-
-void _flags(BaseResultCollector collector) {
-  _recordMatch(
-    collector,
-    RegExp('aBc', caseSensitive: false).firstMatch('xAbC'),
-  );
-  _recordMatch(
-    collector,
-    RegExp(r'(a)\1', caseSensitive: false).firstMatch('Aa'),
-  );
-  _recordMatch(collector, RegExp('a.b').firstMatch('a\nb'));
-  _recordMatch(collector, RegExp('a.b', dotAll: true).firstMatch('a\nb'));
-  _recordMatch(collector, RegExp(r'a$', multiLine: true).firstMatch('a\nb'));
+  try {
+    // ignore: valid_regexps
+    RegExp('[z-a]');
+    collector.recordBool(e: false);
+  } on FormatException {
+    collector.recordBool(e: true);
+  }
 }
 
 void _escape(BaseResultCollector collector) {
-  collector.recordString(e: RegExp.escape('hello'));
-  collector.recordString(
-    e: RegExp.escape(r'a.b*c+d?e$f^g(h)i[j]k{l}m|n\o/p-q'),
-  );
-  collector.recordString(e: RegExp.escape('ä.ö'));
-  collector.recordString(e: RegExp.escape('👋+'));
-  collector.recordBool(e: RegExp(RegExp.escape('1+1=2')).hasMatch('1+1=2'));
+  collector.recordString(e: RegExp.escape('Hello world'));
+  collector.recordString(e: RegExp.escape(r'1+1=2'));
+  collector.recordString(e: RegExp.escape(r'a$b(c)d*e.f?g[h]i\j^k{l|m}'));
+  collector.recordBool(e: RegExp(RegExp.escape(r'1+1')).hasMatch('1+1=2'));
+  collector.recordBool(e: RegExp(RegExp.escape(r'1+1')).hasMatch('111'));
 }
 
-void _invalidPattern(BaseResultCollector collector) {
-  for (final pattern in ['(a', 'a)', '*', 'a{3,1}']) {
-    try {
-      RegExp(pattern);
-      collector.recordBool(e: false);
-    } on FormatException {
-      collector.recordBool(e: true);
-    }
+void _anchors(BaseResultCollector collector) {
+  collector.recordBool(e: RegExp(r'^abc$').hasMatch('abc'));
+  collector.recordBool(e: RegExp(r'^abc$').hasMatch('xabc'));
+  collector.recordBool(e: RegExp(r'^abc$').hasMatch('abcx'));
+  // Non-multiline `^` never matches past index 0.
+  collector.recordBool(e: RegExp(r'^b').hasMatch('ab'));
+  collector.recordBool(e: _rx('^b', m: true).hasMatch('ab'));
+  collector.recordString(e: _rx(r'^\w+', m: true).firstMatch('ab\ncd')![0]!);
+  collector.recordString(e: _rx(r'\w+$', m: true).firstMatch('ab\ncd')![0]!);
+  collector.recordBool(e: RegExp(r'\bword\b').hasMatch('a word here'));
+  collector.recordBool(e: RegExp(r'\bword\b').hasMatch('sword'));
+  collector.recordBool(e: RegExp(r'\Bo').hasMatch('word'));
+}
+
+void _charClasses(BaseResultCollector collector) {
+  collector.recordString(e: RegExp(r'\d+').firstMatch('ab123cd')![0]!);
+  collector.recordString(e: RegExp(r'[^0-9]+').firstMatch('ab123cd')![0]!);
+  collector.recordBool(e: RegExp(r'\D').hasMatch('123a'));
+  collector.recordBool(e: RegExp(r'\D').hasMatch('123'));
+  collector.recordString(e: RegExp('[a-c]{3}').firstMatch('zzabczz')![0]!);
+  collector.recordBool(e: RegExp('[abc]+').hasMatch('xyz'));
+  // Class-internal escapes that we support.
+  collector.recordString(e: RegExp(r'[\t\n]').firstMatch('a\nb')![0]!);
+  collector.recordString(e: RegExp(r'[\x41]').firstMatch('xAy')![0]!);
+}
+
+void _quantifiers(BaseResultCollector collector) {
+  collector.recordString(e: RegExp('a{2,3}').firstMatch('aaaa')![0]!);
+  collector.recordString(e: RegExp('a{2,3}?').firstMatch('aaaa')![0]!);
+  collector.recordString(e: RegExp('a*').firstMatch('bbb')![0]!);
+  collector.recordString(e: RegExp('<.*>').firstMatch('<a><b>')![0]!);
+  collector.recordString(e: RegExp('<.*?>').firstMatch('<a><b>')![0]!);
+  collector.recordBool(e: RegExp('a?').hasMatch(''));
+}
+
+void _alternation(BaseResultCollector collector) {
+  collector.recordString(e: RegExp('cat|dog').firstMatch('hotdog')![0]!);
+  collector.recordString(e: RegExp('foo|foobar').firstMatch('foobar')![0]!);
+  collector.recordBool(e: RegExp(r'^(?:a|b)+$').hasMatch('abab'));
+  collector.recordBool(e: RegExp(r'^(?:a|b)+$').hasMatch('abc'));
+}
+
+void _groups(BaseResultCollector collector) {
+  final match = RegExp(r'(\w+)-(\w+)').firstMatch('big-red')!;
+  collector.recordString(e: match[0]!);
+  collector.recordString(e: match[1]!);
+  collector.recordString(e: match[2]!);
+  collector.recordInt(e: match.groupCount);
+  // Nested groups.
+  final nested = RegExp(r'((a)(b))?').firstMatch('ab')!;
+  collector.recordInt(e: nested.groupCount);
+  collector.recordString(e: nested[1]!);
+  collector.recordString(e: nested[3]!);
+  // Non-participating group.
+  final either = RegExp(r'(x)|(y)').firstMatch('y')!;
+  collector.recordString(e: either[1] ?? 'unset');
+  collector.recordString(e: either[2]!);
+}
+
+void _namedGroups(BaseResultCollector collector) {
+  final match = RegExp(r'(?<year>\d{4})-(?<month>\d{2})').firstMatch('2026-09')!;
+  collector.recordString(e: match.namedGroup('year')!);
+  collector.recordString(e: match.namedGroup('month')!);
+  collector.recordInt(e: match.groupCount);
+  collector.recordString(e: match.groupNames.join(','));
+  try {
+    match.namedGroup('nope');
+    collector.recordBool(e: false);
+  } on ArgumentError {
+    collector.recordBool(e: true);
   }
 }
 
-void _replaceAll(BaseResultCollector collector) {
-  collector
-    ..recordString(e: 'aabaaab'.replaceAll(RegExp('a+'), 'x'))
-    ..recordString(e: 'abc'.replaceAll(RegExp('d'), 'x'))
-    ..recordString(e: 'abc'.replaceAll(RegExp('b*'), '-'))
-    ..recordString(e: ''.replaceAll(RegExp(''), '|'))
-    ..recordString(e: 'ab'.replaceAll(RegExp(''), '|'))
-    // Replacements are inserted literally, without JS-style `\$` patterns.
-    ..recordString(e: 'abc'.replaceAll(RegExp('(b)'), r'[$1$&]'))
-    ..recordString(
-      e: 'Hello World'.replaceAll(RegExp('o', caseSensitive: false), '0'),
-    )
-    ..recordString(e: 'a 👋 b'.replaceAll(RegExp(' '), '_'))
-    ..recordString(e: 'ab\nab'.replaceAll(RegExp('^a', multiLine: true), 'X'));
+void _backreferences(BaseResultCollector collector) {
+  collector.recordBool(e: RegExp(r'(\w) \1').hasMatch('hey hey'));
+  collector.recordBool(e: RegExp(r'(\w) \1').hasMatch('hey hoo'));
+  collector.recordString(e: RegExp(r'(\w)\1+').firstMatch('aaabbb')![0]!);
 }
 
-void _characterClassesAndEscapes(BaseResultCollector collector) {
-  _recordMatch(collector, RegExp(r'(\w+)=(\d+)').firstMatch('foo=42'));
-  _recordMatch(
-    collector,
-    RegExp(r'([^<]*)(?:<([^>|]+)(?:\|([^>]*))?>)?').firstMatch('/hello/<name>'),
-  );
-  collector.recordBool(
-    e: RegExp(r'^[^()<>@,;:"\\/[\]?={} \t\x00-\x1F\x7F]+$')
-        .hasMatch('application-json'),
-  );
-  collector.recordBool(e: RegExp(r'\bword\b').hasMatch('a word here'));
-  collector.recordBool(e: RegExp(r'\n|\r\n|\r(?!\n)').hasMatch('a\rb'));
+void _lookarounds(BaseResultCollector collector) {
+  collector.recordString(e: RegExp(r'foo(?=bar)').firstMatch('foobar')![0]!);
+  collector.recordBool(e: RegExp(r'foo(?=bar)').hasMatch('foobaz'));
+  collector.recordString(e: RegExp(r'foo(?!bar)').firstMatch('foobaz')![0]!);
+  collector.recordBool(e: RegExp(r'foo(?!bar)').hasMatch('foobar'));
+}
+
+void _flags(BaseResultCollector collector) {
+  collector.recordBool(e: _rx('HELLO', i: true).hasMatch('hello'));
+  collector.recordBool(e: _rx('HELLO', i: true).hasMatch('HELLO'));
+  collector.recordBool(e: _rx('HELLO').hasMatch('hello'));
+  collector.recordBool(e: _rx('a.c', s: true).hasMatch('a\nc'));
+  collector.recordBool(e: _rx('a.c').hasMatch('a\nc'));
+  collector.recordBool(e: _rx('a.c').hasMatch('axc'));
+  // Unicode mode handles surrogate pairs as code points.
+  collector.recordBool(e: _rx('𝄞', u: true).hasMatch('a𝄞b'));
+  collector.recordString(e: _rx(r'\u{1D11E}', u: true).firstMatch('a𝄞b')![0]!);
+}
+
+void _matchAsPrefix(BaseResultCollector collector) {
+  collector.recordBool(e: RegExp('bc').matchAsPrefix('abc', 1) != null);
+  collector.recordBool(e: RegExp('bc').matchAsPrefix('abc', 0) != null);
+  collector.recordBool(e: RegExp('abc').matchAsPrefix('abc', 0) != null);
+  collector.recordBool(e: RegExp('abc').matchAsPrefix('xabc', 1) == null);
+  final match = RegExp(r'\w+').matchAsPrefix('hello world', 6)!;
+  collector.recordString(e: match[0]!);
+  collector.recordInt(e: match.start);
+}
+
+void _replaceAllRegExp(BaseResultCollector collector) {
+  collector.recordString(e: 'one two three'.replaceAll(RegExp('two'), '2'));
+  collector.recordString(e: 'aaa'.replaceAll(RegExp('a'), '-'));
+  collector.recordString(e: 'abcabc'.replaceAll(RegExp('b'), ''));
+  collector.recordString(e: 'a-b-c'.replaceAll(RegExp(r'\d'), 'N'));
+  collector.recordString(e: 'abc'.replaceAll(RegExp('x'), 'N'));
+  collector.recordString(e: 'caab'.replaceAll(RegExp('a+'), 'X'));
+  // Zero-width matches must not loop forever.
+  collector.recordString(e: 'ab'.replaceAll(RegExp(r'\b'), '|'));
+  collector.recordString(e: ''.replaceAll(RegExp('a'), 'x'));
+}
+
+void _stringMatchIterator(BaseResultCollector collector) {
+  collector.recordInt(e: RegExp('a').allMatches('banana').length);
+  collector.recordString(e: RegExp('a').allMatches('banana').last[0]!);
+  collector.recordInt(e: RegExp('a').allMatches('banana').last.start);
+  collector.recordInt(e: RegExp('z').allMatches('banana').length);
 }

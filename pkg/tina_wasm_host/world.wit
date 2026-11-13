@@ -1,0 +1,24 @@
+package wasmdart:tests;
+
+interface result-collector {
+  record-string: func(e: string);
+  record-optional-string: func(e: option<string>);
+  record-string-list: func(e: list<string>);
+  record-double: func(e: f64);
+  record-int: func(e: s64);
+  record-bool: func(e: bool);
+}
+
+interface tested-module {
+  count-tests: func() -> u32;
+
+  /// Runs one test case. Async because a case may perform component-model
+  /// async work (print lowers to a wasi:cli/stdout stream write): the caller
+  /// keeps polling `callback` until the returned task has no waitables left.
+  invoke-test: async func(number: u32);
+}
+
+world root {
+    import result-collector;
+    export tested-module;
+}

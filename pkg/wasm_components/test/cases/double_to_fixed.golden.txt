@@ -1,0 +1,14 @@
+{"type":"start","test":0}
+{"type":"string","value":"3"}
+{"type":"string","value":"1"}
+{"type":"string","value":"-3"}
+{"type":"string","value":"1"}
+{"type":"string","value":"0"}
+{"type":"string","value":"-1"}
+{"type":"string","value":"123"}
+{"type":"string","value":"2.50"}
+{"type":"string","value":"2.5"}
+{"type":"string","value":"10"}
+{"type":"string","value":"1"}
+{"type":"string","value":"0.1"}
+{"type":"end","test":0}

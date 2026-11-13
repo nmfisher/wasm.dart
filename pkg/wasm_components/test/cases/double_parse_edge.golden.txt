@@ -1,0 +1,14 @@
+{"type":"start","test":0}
+{"type":"string","value":"10.0"}
+{"type":"string","value":"0.0"}
+{"type":"string","value":"Infinity"}
+{"type":"string","value":"0.0"}
+{"type":"string","value":"10.0"}
+{"type":"string","value":"1.0"}
+{"type":"string","value":"1.0"}
+{"type":"string","value":"100000.0"}
+{"type":"string","value":"null"}
+{"type":"string","value":"null"}
+{"type":"string","value":"null"}
+{"type":"string","value":"1.0"}
+{"type":"end","test":0}

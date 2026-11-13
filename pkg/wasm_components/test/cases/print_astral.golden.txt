@@ -1,0 +1,7 @@
+{"type":"start","test":0}
+emoji: 😀
+supplementary: 𐐀𝄞
+unpaired high: �
+unpaired low: �
+mixed: a😀b�c
+{"type":"end","test":0}

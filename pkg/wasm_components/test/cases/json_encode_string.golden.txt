@@ -1,0 +1,26 @@
+{"type":"start","test":0}
+{"type":"string","value":"\"hello\""}
+{"type":"string","value":"\"\""}
+{"type":"string","value":"\"a b c\""}
+{"type":"end","test":0}
+{"type":"start","test":1}
+{"type":"string","value":"\"a\\\"b\""}
+{"type":"string","value":"\"a\\\\b\""}
+{"type":"string","value":"\"a\\nb\\tc\""}
+{"type":"string","value":"\"\\b\\f\\r\""}
+{"type":"string","value":"\"\\u0001\\u001f\""}
+{"type":"string","value":"\"\\u0000\""}
+{"type":"end","test":1}
+{"type":"start","test":2}
+{"type":"string","value":"\"\""}
+{"type":"string","value":"\"Γ𝄞\""}
+{"type":"string","value":"\"𝄞\""}
+{"type":"string","value":"\"\\ud800\""}
+{"type":"string","value":"\"  \""}
+{"type":"end","test":2}
+{"type":"start","test":3}
+{"type":"string","value":"true"}
+{"type":"string","value":"null"}
+{"type":"string","value":"1.5"}
+{"type":"string","value":"12"}
+{"type":"end","test":3}

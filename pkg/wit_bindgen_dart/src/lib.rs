@@ -113,10 +113,14 @@ fn wit_bindgen_dart_internal(input: GenerateDartOptions) -> anyhow::Result<Vec<G
 
         let mut dart = DartSource::new(&import_map);
         if !package.docs.is_empty() {
+            // Package docs become a `library;` directive, which Dart
+            // requires before all other directives - so it goes to the
+            // preamble the header emits before its imports.
             let mut library_directive = DartDefinition::default();
             library_directive.write_docs(&package.docs);
             uwriteln!(&mut library_directive, "library;");
-            dart.consume_definition(library_directive);
+            let DartDefinition(text) = &library_directive;
+            dart.preamble.push_str(text);
         }
 
         for (_, interface) in &package.interfaces {
@@ -204,6 +208,145 @@ mod test {
 
         print!("{}", generator.main);
         Ok(())
+    }
+
+    fn generate_world_source(wit: &str, world_name: &str) -> anyhow::Result<(String, usize)> {
+        let mut resolve = Resolve::default();
+        let package = resolve.push_str("resource-borrow.wit", wit)?;
+        let world = resolve.select_world(&[package], Some(world_name))?;
+        let mut abi = ImportsAndExports::default();
+        let map = ImportMap::default();
+        let mut generator = DartWorldGenerator::new(&mut abi, &map);
+        let mut files = Files::default();
+        generator.generate(&mut resolve, world, &mut files)?;
+        let source = generator.main.to_string();
+        drop(generator);
+        let resource_drops = abi
+            .imports
+            .iter()
+            .filter(|import| {
+                matches!(
+                    import.definition,
+                    ImportedFunctionDefinition::ResourceDrop { .. }
+                )
+            })
+            .count();
+        Ok((source, resource_drops))
+    }
+
+    #[test]
+    fn imported_resource_borrows_are_dropped_across_alias_and_nested_lifts() {
+        let (source, resource_drops) = generate_world_source(
+            r#"
+package test:resource-borrow@0.1.0;
+
+interface host {
+    resource shared;
+}
+
+interface plugin {
+    use host.{shared};
+    type shared-alias = shared;
+    direct: func(value: borrow<shared>);
+    alias: func(value: borrow<shared-alias>);
+    nested: func(value: option<borrow<shared>>);
+}
+
+world root {
+    import host;
+    export plugin;
+}
+"#,
+            "root",
+        )
+        .expect("WIT imported-borrow fixture should resolve and generate");
+        assert_eq!(
+            source.matches("final _borrowCleanups =").count(),
+            3,
+            "{source}"
+        );
+        assert_eq!(
+            source.matches("_borrowCleanups.add(() => _drop$").count(),
+            3,
+            "{source}"
+        );
+        assert_eq!(
+            source
+                .matches("for (final cleanup in _borrowCleanups.reversed)")
+                .count(),
+            3,
+            "{source}"
+        );
+        assert_eq!(
+            resource_drops, 2,
+            "the alias and base handle each have a canonical drop ABI entry"
+        );
+    }
+
+    #[test]
+    fn imported_alias_to_export_owned_resource_uses_local_rep() {
+        let (source, resource_drops) = generate_world_source(
+            r#"
+package test:owner-alias@0.1.0;
+
+interface owner {
+    resource local-token;
+}
+
+interface consumer {
+    use owner.{local-token};
+}
+
+interface observer {
+    use owner.{local-token};
+    inspect: func(value: borrow<local-token>) -> u32;
+}
+
+world root {
+    import consumer;
+    export owner;
+    export observer;
+}
+"#,
+            "root",
+        )
+        .expect("imported alias to exported owner resource should resolve and generate");
+        assert!(
+            !source.contains("_borrowCleanups"),
+            "export-owned resource borrow must use its local rep: {source}"
+        );
+        assert_eq!(
+            resource_drops, 0,
+            "export-owned resource must not import ResourceDrop"
+        );
+    }
+
+    #[test]
+    fn owner_world_borrow_uses_rep_without_guest_borrow_drop() {
+        let (source, resource_drops) = generate_world_source(
+            r#"
+package test:owner-borrow@0.1.0;
+
+interface owner {
+    resource local-token;
+    inspect: func(value: borrow<local-token>) -> u32;
+}
+
+world root {
+    export owner;
+}
+"#,
+            "root",
+        )
+        .expect("owner resource fixture should resolve and generate");
+        assert!(
+            !source.contains("_borrowCleanups"),
+            "owner borrow must not create guest cleanup: {source}"
+        );
+        assert_eq!(
+            resource_drops, 0,
+            "owner rep borrow must not import ResourceDrop"
+        );
     }
 
     #[test]

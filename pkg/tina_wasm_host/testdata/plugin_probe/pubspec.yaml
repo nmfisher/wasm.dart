@@ -1,0 +1,8 @@
+name: issue85_plugin_probe
+publish_to: none
+environment:
+  sdk: ^3.14.0
+dependencies:
+  wasm_components: ^0.1.1-preview.0
+dev_dependencies:
+  wasm_tools: ^0.1.1-preview.0

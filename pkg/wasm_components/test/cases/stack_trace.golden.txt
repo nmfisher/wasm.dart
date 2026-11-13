@@ -1,0 +1,5 @@
+{"type":"start","test":0}
+{"type":"bool","value":true}
+{"type":"bool","value":true}
+{"type":"bool","value":true}
+{"type":"end","test":0}

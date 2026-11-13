@@ -2,6 +2,7 @@ import 'package:args/command_runner.dart';
 import 'package:logging/logging.dart';
 
 import 'compiler/command.dart';
+import 'stamp/command.dart';
 import 'wit_gen/command.dart';
 
 Future<void> runCli(Logger logger, List<String> args) async {
@@ -11,6 +12,7 @@ Future<void> runCli(Logger logger, List<String> args) async {
           'Tools to interop between Dart and WebAssembly components.',
         )
         ..addCommand(GenerateWitInteropCommand(logger))
-        ..addCommand(CompileCommand(logger));
+        ..addCommand(CompileCommand(logger))
+        ..addCommand(StampAbiCommand(logger));
   await runner.run(args);
 }

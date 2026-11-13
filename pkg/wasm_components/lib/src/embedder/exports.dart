@@ -5,26 +5,28 @@ library;
 
 // ignore: import_internal_library
 import 'dart:_wasm';
-import 'dart:convert';
 
 import '../runtime/async/task.dart';
-import 'charcodes.dart';
+import '../runtime/async/timer.dart';
 import 'clock.dart';
-import 'constants.dart';
-import 'dark_arts.dart';
+import 'double_format.dart';
+import 'double_parse.dart';
+import 'json_encode.dart';
 import 'number_format.dart';
-import 'numbers/parse.dart';
-import 'numbers/ryu.dart';
-import 'numbers/to_exponential.dart';
-import 'numbers/to_fixed.dart';
-import 'regex/literal.dart';
-import 'regex/parser.dart';
-import 'regex/regex.dart';
+import 'regexp.dart';
 import 'stack_trace.dart';
+import 'stack_trace_capture.dart';
 import 'string.dart';
 import 'string_buffer.dart';
 import 'tmp_print.dart';
 import 'utils.dart';
+
+// The dart.weak*/baseUri/isWindows exports live in [weak.dart]; this import
+// keeps them in the compiled module, exactly like the unused
+// `package:wasm_components` import in the generated bindings keeps this
+// file's own exports alive.
+// ignore: unused_import
+import 'weak.dart';
 
 Never _unsupportedAsyncSchedule() {
   throw StateError('Tried to schedule async operation, outside of async task.');
@@ -36,7 +38,7 @@ WasmExternRef scheduleOnce(
   WasmFunction<WasmVoid Function(WasmAnyRef)> callback,
   WasmAnyRef arg,
 ) {
-  _unsupportedAsyncSchedule();
+  return _schedule(delay, callback, arg, isPeriodic: false);
 }
 
 @pragma('wasm:export')
@@ -45,7 +47,40 @@ WasmExternRef scheduleRepeated(
   WasmFunction<WasmVoid Function(WasmAnyRef)> callback,
   WasmAnyRef arg,
 ) {
-  _unsupportedAsyncSchedule();
+  return _schedule(interval, callback, arg, isPeriodic: true);
+}
+
+WasmExternRef _schedule(
+  WasmI64 delay,
+  WasmFunction<WasmVoid Function(WasmAnyRef)> callback,
+  WasmAnyRef arg, {
+  required bool isPeriodic,
+}) {
+  // The SDK's root-zone Timer patch calls these, which means a task is
+  // running (timers are unreachable before `spawnTask`, which is the only
+  // thing that sets up the async machinery). Timers are wait-for subtasks of
+  // the currently running task: the callback runs in the task's zone, so its
+  // continuations stay on the task's event loop and the host can drive the
+  // timer to completion. An optional task wrapping a timer would never be
+  // entered under wasmtime (guest tasks are only entered while their parent
+  // awaits them), so attaching to the current task is the only correct
+  // registration point.
+  final task = Task.forCurrentThreadUnchecked();
+  if (task == null) _unsupportedAsyncSchedule();
+
+  final handle = EmbedderTimer(
+    task,
+    Duration(microseconds: delay.toInt()),
+    // Note: the callback must be a block-bodied closure. An arrow body
+    // (`() => callback.call(arg)`) makes dart2wasm emit `unreachable` after
+    // the call, because the wasm `WasmFunction.call` signature's return is
+    // not a plain void.
+    () {
+      callback.call(arg);
+    },
+    isPeriodic,
+  );
+  return WasmAnyRef.fromObject(handle).externalize();
 }
 
 @pragma('wasm:export')
@@ -71,7 +106,15 @@ WasmVoid queueMicrotask(
 
 @pragma('wasm:export')
 WasmVoid clearSchedule(WasmExternRef? schedule) {
-  _unsupportedAsyncSchedule();
+  // A timer only hands out a handle after firing has been arranged; a null
+  // handle means the timer already fired (see the SDK's Timer patch, which
+  // never calls this for a null handle). Null tests on externrefs must use
+  // `isNull`: `== null` would lower to a cast to anyref, which externref is
+  // not.
+  if (schedule.isNull) return WasmVoid();
+  final handle = schedule!.internalize().toObject() as EmbedderTimer;
+  handle.cancel();
+  return WasmVoid();
 }
 
 @pragma('wasm:export')
@@ -103,73 +146,66 @@ WasmExternRef i64ToString(WasmI64 value, WasmI32 radix) {
 
 @pragma('wasm:export')
 WasmExternRef f64ToString(WasmF64 value) {
-  return formatDouble(value.toDouble()).externalize();
-}
-
-@pragma('wasm:export')
-WasmExternRef f64ToFixed(WasmF64 value, WasmI32 fractionDigits) {
-  final digits = fractionDigits.toIntUnsigned();
-  if (digits > maxFixedFractionDigits) {
-    throw RangeError.range(digits, 0, maxFixedFractionDigits, 'fractionDigits');
-  }
-
-  return formatDoubleToFixed(value.toDouble(), digits).externalize();
+  return doubleToString(value.toDouble()).externalize();
 }
 
 @pragma('wasm:export')
 WasmExternRef f64ToExponential(WasmF64 value) {
-  return formatDoubleToExponential(value.toDouble(), null).externalize();
+  return doubleToExponentialWithFractionDigits(value.toDouble(), -1)
+      .externalize();
 }
 
 @pragma('wasm:export')
-WasmExternRef f64ToExponentialWithFractionDigits(
-  WasmF64 value,
-  WasmI32 fractionDigits,
-) {
-  final digits = fractionDigits.toIntUnsigned();
-  if (digits > maxExponentialFractionDigits) {
-    throw RangeError.range(
-      digits,
-      0,
-      maxExponentialFractionDigits,
-      'fractionDigits',
-    );
-  }
-
-  return formatDoubleToExponential(value.toDouble(), digits).externalize();
+WasmExternRef f64ToExponentialWithFractionDigits(WasmF64 value, WasmI32 digits) {
+  return doubleToExponentialWithFractionDigits(
+    value.toDouble(),
+    digits.toIntSigned(),
+  ).externalize();
 }
 
 @pragma('wasm:export')
-WasmExternRef f64ToPrecision(WasmF64 value, WasmI32 precision) {
-  final dartPrecision = precision.toIntUnsigned();
-  if (dartPrecision < 1 || dartPrecision > maxPrecision) {
-    throw RangeError.range(dartPrecision, 1, maxPrecision, 'precision');
-  }
+WasmExternRef f64ToPrecision(WasmF64 value, WasmI32 digits) {
+  return doubleToPrecision(value.toDouble(), digits.toIntSigned())
+      .externalize();
+}
 
-  return formatDoubleToPrecision(value.toDouble(), dartPrecision).externalize();
+@pragma('wasm:export')
+WasmExternRef f64ToFixed(WasmF64 value, WasmI32 digits) {
+  return doubleToFixed(value.toDouble(), digits.toIntSigned()).externalize();
+}
+
+final class _DoubleTryParseResult {
+  final double value;
+
+  _DoubleTryParseResult(this.value);
 }
 
 @pragma('wasm:export')
 WasmExternRef? doubleTryParse(WasmExternRef? string) {
-  final parsed = parseDouble(WasmStringImplementation.fromExtern(string));
-  if (parsed == invalidDouble) {
-    return .nullRef;
+  final result = tryParseDouble(WasmStringImplementation.fromExtern(string));
+  if (result is DoubleParseSuccess) {
+    return WasmAnyRef.fromObject(_DoubleTryParseResult(result.value))
+        .externalize();
   }
-
-  return parsed.toWasmI64().asWasmF64.toDouble().externalize();
+  return WasmExternRef.nullRef;
 }
 
 @pragma('wasm:export')
 WasmF64 tryParseResultGetDouble(WasmExternRef? parseResult) {
-  final value = parseResult!.internalize().toObject();
-  return (value as double).toWasmF64();
+  final result =
+      parseResult!.internalize().toObject() as _DoubleTryParseResult;
+  return WasmF64.fromDouble(result.value);
 }
 
 @pragma('wasm:export')
 WasmF64 doubleParseInfallible(WasmExternRef? string) {
-  return parseDouble(WasmStringImplementation.fromExtern(string))
-      .toWasmI64()
-      .asWasmF64;
+  final result = tryParseDouble(WasmStringImplementation.fromExtern(string));
+  if (result is DoubleParseSuccess) {
+    return WasmF64.fromDouble(result.value);
+  }
+  // The SDK only calls this on strings it has already validated (e.g. JSON
+  // number tokens). Returning zero keeps a bad call non-fatal.
+  return const WasmF64(0.0);
 }
 
 @pragma('wasm:export')
@@ -210,11 +246,11 @@ WasmExternRef? stringSubstring(
 
 @pragma('wasm:export')
 WasmI32 stringIndexOfString(WasmExternRef? a, WasmExternRef? b, WasmI32 start) {
-  final haystack = WasmStringImplementation.fromExtern(a);
-  final needle = WasmStringImplementation.fromExtern(b);
-
   return WasmI32.fromInt(
-    LiteralNode(needle).firstIndexOf(haystack, start.toIntUnsigned()),
+    WasmStringImplementation.fromExtern(a).indexOfString(
+      WasmStringImplementation.fromExtern(b),
+      start.toIntSigned(),
+    ),
   );
 }
 
@@ -224,11 +260,11 @@ WasmI32 stringLastIndexOfString(
   WasmExternRef? b,
   WasmI32 start,
 ) {
-  final haystack = WasmStringImplementation.fromExtern(a);
-  final needle = WasmStringImplementation.fromExtern(b);
-
   return WasmI32.fromInt(
-    LiteralNode(needle).searchBackwards(haystack, start.toIntUnsigned()),
+    WasmStringImplementation.fromExtern(a).lastIndexOfString(
+      WasmStringImplementation.fromExtern(b),
+      start.toIntSigned(),
+    ),
   );
 }
 
@@ -253,6 +289,20 @@ WasmExternRef? stringConcat(WasmExternRef? a, WasmExternRef? b) {
 WasmExternRef? stringRepeat(WasmExternRef? string, WasmI32 amount) {
   final wasmString = WasmStringImplementation.fromExtern(string);
   return wasmString.repeat(amount.toIntSigned()).externalize();
+}
+
+@pragma('wasm:export')
+WasmExternRef? stringReplaceAllString(
+  WasmExternRef? string,
+  WasmExternRef? needle,
+  WasmExternRef? replacement,
+) {
+  return WasmStringImplementation.fromExtern(string)
+      .replaceAllString(
+        WasmStringImplementation.fromExtern(needle),
+        WasmStringImplementation.fromExtern(replacement),
+      )
+      .externalize();
 }
 
 @pragma('wasm:export')
@@ -318,161 +368,6 @@ WasmVoid stringToCodeUnits(
 }
 
 @pragma('wasm:export')
-WasmExternRef regexpCreateOrFailWithString(
-  WasmExternRef? string,
-  WasmI32 multiLine,
-  WasmI32 caseSensitive,
-  WasmI32 unicode,
-  WasmI32 dotAll,
-) {
-  final options = RegexParseOptions(
-    multiline: multiLine.toBool(),
-    caseSensitive: caseSensitive.toBool(),
-    unicode: unicode.toBool(),
-    dotAll: dotAll.toBool(),
-  );
-
-  final parser = RegexParser(
-    WasmStringImplementation.fromExtern(string),
-    options,
-    WasmStringImplementation.fromDartCodeUnits,
-  );
-  return WasmAnyRef.fromObject(parser.parse()).externalize();
-}
-
-@pragma('wasm:export')
-WasmI32 regexpIsRegexp(WasmExternRef? ref) {
-  // We throw a Dart exception directly in regexpCreateOrFailWithString instead.
-  return const WasmI32(1);
-}
-
-@pragma('wasm:export')
-WasmExternRef regexpEscape(WasmExternRef? string) {
-  final input = WasmStringImplementation.fromExtern(string);
-  final length = input.length;
-
-  List<int>? escaped;
-  for (var i = 0; i < length; i++) {
-    final char = input.codeUnitAtUnchecked(i);
-    final needsEscape = switch (char) {
-      $$ ||
-      $lparen ||
-      $rparen ||
-      $asterisk ||
-      $plus ||
-      $dot ||
-      $question ||
-      $lbracket ||
-      $backslash ||
-      $rbracket ||
-      $caret ||
-      $lbrace ||
-      $bar ||
-      $rbrace => true,
-      _ => false,
-    };
-
-    if (needsEscape) {
-      escaped ??= [for (var j = 0; j < i; j++) input.codeUnitAtUnchecked(j)];
-      escaped.add($backslash);
-    }
-    escaped?.add(char);
-  }
-
-  if (escaped == null) {
-    // Nothing to escape.
-    return input.externalize();
-  }
-
-  return WasmStringImplementation.fromDartCodeUnits(
-    escaped,
-    input.isOneByteString,
-  ).externalize();
-}
-
-@pragma('wasm:export')
-WasmExternRef? regexpMatch(
-  WasmExternRef? regexp,
-  WasmExternRef? string,
-  WasmI32 start,
-  WasmI32 asPrefix,
-) {
-  final regex = regexp!.internalize().toObject() as Regex;
-  final match = regex.search(
-    WasmStringImplementation.fromExtern(string),
-    start.toIntUnsigned(),
-    asPrefix: asPrefix.toBool(),
-  );
-
-  return match?.externalize();
-}
-
-RegexMatch _regexMatchFromExtern(WasmExternRef? match) {
-  return match!.internalize().toObject() as RegexMatch;
-}
-
-@pragma('wasm:export')
-WasmI32 regexpMatchGetStart(WasmExternRef? match) {
-  return _regexMatchFromExtern(match).start.toWasmI32();
-}
-
-@pragma('wasm:export')
-WasmI32 regexpMatchGetEnd(WasmExternRef? match) {
-  return _regexMatchFromExtern(match).end.toWasmI32();
-}
-
-@pragma('wasm:export')
-WasmI32 regexpMatchGetGroupCount(WasmExternRef? match) {
-  return _regexMatchFromExtern(match).groupCount.toWasmI32();
-}
-
-@pragma('wasm:export')
-WasmExternRef? regexpMatchGetGroup(WasmExternRef? match, WasmI32 index) {
-  final regexMatch = _regexMatchFromExtern(match);
-  final group = index.toIntUnsigned();
-  final start = regexMatch.groupStart(group);
-  if (start == -1) {
-    return null;
-  }
-
-  return (regexMatch.input as WasmStringImplementation)
-      .substring(start.toWasmI32(), regexMatch.groupEnd(group).toWasmI32())
-      .externalize();
-}
-
-@pragma('wasm:export')
-WasmI32 regexpMatchGetNamedGroups(WasmExternRef? match) {
-  // TODO: Support named groups. The parser rejects them for now, so no match
-  // has any.
-  return const WasmI32(0);
-}
-
-@pragma('wasm:export')
-WasmExternRef regexpMatchGetGroupName(WasmExternRef? match, WasmI32 index) {
-  throw UnsupportedError('Named groups are not supported');
-}
-
-@pragma('wasm:export')
-WasmExternRef? regexpMatchGetGroupByName(
-  WasmExternRef? match,
-  WasmI32 nameIndex,
-) {
-  throw UnsupportedError('Named groups are not supported');
-}
-
-@pragma('wasm:export')
-WasmI32 isWindows() {
-  // This is only used for URI<->file path formatting, which is not relevant for
-  // WASI.
-  return const WasmI32(0);
-}
-
-@pragma('wasm:export')
-WasmExternRef? baseUri() {
-  return stubRootUri.externalize();
-}
-
-@pragma('wasm:export')
 WasmExternRef stringBufferCreate() {
   return WasmStringBuffer().externalize();
 }
@@ -514,20 +409,33 @@ WasmExternRef stringBufferToString(WasmExternRef? buffer) {
 
 @pragma('wasm:export')
 WasmExternRef stackTraceGetCurrent() {
-  // WASI doesn't expose stack traces, so this is unimplemented.
-  return const UnsupportedStackTrace().externalize();
+  // The trace exists in the host (it owns the wasm stack), so the capture
+  // import asks the host to render it into linear memory. Without the
+  // `component.implicitImport_stackTraceCaptureUtf16` dependency - a program
+  // that never reads `StackTrace.current`, or a raw module without the
+  // rewrite - the transform stubs the capture and this falls back to the
+  // old constant, keeping the SDK-visible contract (a non-null externref)
+  // intact.
+  final captured = tryCaptureStackTrace();
+  if (captured == null) {
+    return const UnsupportedStackTrace().externalize();
+  }
+  return captured.externalize();
 }
 
 @pragma('wasm:export')
-WasmExternRef stackTraceToString(WasmExternRef? _) {
-  return stackTracesAreUnavailableMessage.externalize();
+WasmExternRef stackTraceToString(WasmExternRef? trace) {
+  // Render the string captured by `stackTraceGetCurrent` rather than
+  // capturing again: by the time the SDK calls this (from
+  // `_EmbedderStackTrace.toString`) the frames that `StackTrace.current`
+  // observed have returned, so a second capture would show only the toString
+  // machinery itself and lose the user's call chain.
+  return stackTraceToStringImpl(trace).externalize();
 }
-
 @pragma('wasm:export')
 WasmExternRef jsonEncodeString(WasmExternRef? line) {
-  final dartString = line!.createDartString();
-  final encoded = json.encode(dartString);
-  return encoded.embedderString.externalize();
+  return jsonEncodeStringImpl(WasmStringImplementation.fromExtern(line))
+      .externalize();
 }
 
 @pragma('wasm:export')
@@ -541,103 +449,29 @@ WasmVoid wasiPrint(WasmExternRef? string) {
   return WasmVoid();
 }
 
-@pragma('wasm:export')
-WasmExternRef? stringReplaceAllString(
-  WasmExternRef? stringRef,
-  WasmExternRef? needleRef,
-  WasmExternRef? replacementRef,
-) {
-  final string = WasmStringImplementation.fromExtern(stringRef);
-  final needle = WasmStringImplementation.fromExtern(needleRef);
-  final replacement = WasmStringImplementation.fromExtern(replacementRef);
-
-  final len = string.length;
-  final nLen = needle.length;
-  final buffer = WasmStringBuffer();
-
-  if (nLen == 0) {
-    buffer.writeString(replacement);
-    for (var i = 0; i < len; i++) {
-      buffer
-        ..writeCharCode(string.codeUnitAtUnchecked(i))
-        ..writeString(replacement);
-    }
-  } else {
-    final literal = LiteralNode(needle);
-    var start = 0;
-    while (true) {
-      final idx = literal.firstIndexOf(string, start);
-      if (idx == -1) {
-        if (start == 0) return stringRef;
-        buffer.writeString(
-          string.substring(start.toWasmI32(), len.toWasmI32()),
-        );
-        break;
-      }
-      buffer
-        ..writeString(string.substring(start.toWasmI32(), idx.toWasmI32()))
-        ..writeString(replacement);
-      start = idx + nLen;
-    }
-  }
-
-  return buffer.renderToString().externalize();
-}
-
-@pragma('wasm:export')
-WasmExternRef? stringReplaceAllRegExp(
-  WasmExternRef? stringRef,
-  WasmExternRef? regexRef,
-  WasmExternRef? replacementRef,
-) {
-  final string = WasmStringImplementation.fromExtern(stringRef);
-  final regex = regexRef!.internalize().toObject() as Regex;
-  final replacement = WasmStringImplementation.fromExtern(replacementRef);
-
-  final len = string.length;
-  final buffer = WasmStringBuffer();
-
-  // End of the previous match, i.e. the start of the pending non-matching part.
-  var lastEnd = 0;
-  var searchStart = 0;
-  var hadMatch = false;
-
-  while (searchStart <= len) {
-    final match = regex.search(string, searchStart, asPrefix: false);
-    if (match == null) break;
-
-    hadMatch = true;
-    buffer
-      ..writeString(
-        string.substring(lastEnd.toWasmI32(), match.start.toWasmI32()),
-      )
-      ..writeString(replacement);
-    lastEnd = match.end;
-
-    // After an empty match, advance by one more to avoid matching the same
-    // position again (like `RegExp.allMatches`). The parser rejects the unicode
-    // flag, so we don't have to skip over surrogate pairs here.
-    searchStart = match.start == match.end ? match.end + 1 : match.end;
-  }
-
-  if (!hadMatch) return stringRef;
-  buffer.writeString(string.substring(lastEnd.toWasmI32(), len.toWasmI32()));
-  return buffer.renderToString().externalize();
-}
+int _randomState = 0x9E3779B97F4A7C15;
 
 @pragma('wasm:export', 'randomInt')
 WasmI64 randomInt() {
-  // Note: This function is recognized by the component compiler, which will add
-  // a dependency on wasi:random/insecure to replace this function with a
-  // get-insecure-random-u64 import.
-  throw UnsupportedError('wasi:random/insecure not available');
+  // Note: This function is recognized by the component compiler, which will
+  // add a dependency on wasi:random/insecure and replace this export with a
+  // get-insecure-random-u64 import. The xorshift64* fallback below only runs
+  // when the raw module is executed without that rewrite (e.g. in tests),
+  // where the runtime also draws its identityHashCode seed from here.
+  var x = _randomState;
+  x ^= x >> 12;
+  x ^= x << 25;
+  x ^= x >> 27;
+  _randomState = x;
+  return WasmI64.fromInt(x * 0x2545F4914F6CDD1D);
 }
 
 @pragma('wasm:export', 'randomIntSecure')
 WasmI64 randomIntSecure() {
-  // Note: This function is recognized by the component compiler, which will add
-  // a dependency on wasi:random/insecure to replace this function with a
-  // get-random-u64 import.
+  // Note: This function is recognized by the component compiler, which will
+  // add a dependency on wasi:random/random and replace this export with a
+  // get-random-u64 import. Unlike [randomInt] there is no meaningful
+  // in-module fallback: secure randomness has to come from the host.
   throw UnsupportedError('wasi:random/random not available');
 }
 
@@ -666,4 +500,148 @@ WasmI32 monotonicClockFrequency() {
 @pragma('wasm:export', 'monotonicClockTicks')
 WasmI64 monotonicClockTicks() {
   return dartMonotonicTicks.toWasmI64();
+}
+
+// ---------------------------------------------------------------------------
+// dart.regexp* — implemented in embedder/regexp.dart
+// ---------------------------------------------------------------------------
+
+/// Compiled regexps and matches cross the wasm boundary as opaque objects,
+/// exactly like `_DoubleTryParseResult` above. The SDK distinguishes a
+/// successful compile from an error-string result with [regexpIsRegexp].
+@pragma('wasm:export', 'regexpCreateOrFailWithString')
+WasmExternRef regexpCreateOrFailWithString(
+  WasmExternRef? string,
+  WasmI32 multiLine,
+  WasmI32 caseSensitive,
+  WasmI32 unicode,
+  WasmI32 dotAll,
+) {
+  final compiled = EmbedderRegexp.compile(
+    WasmStringImplementation.fromExtern(string).toDartString(),
+    multiLine.toBool(),
+    caseSensitive.toBool(),
+    unicode.toBool(),
+    dotAll.toBool(),
+  );
+  return WasmAnyRef.fromObject(compiled).externalize();
+}
+
+@pragma('wasm:export', 'regexpIsRegexp')
+WasmI32 regexpIsRegexp(WasmExternRef? ref) {
+  return WasmI32.fromBool(ref!.internalize().toObject() is EmbedderRegexp);
+}
+
+@pragma('wasm:export', 'regexpEscape')
+WasmExternRef regexpEscape(WasmExternRef? string) {
+  return EmbedderRegexp.escape(WasmStringImplementation.fromExtern(string))
+      .externalize();
+}
+
+@pragma('wasm:export', 'regexpMatch')
+WasmExternRef? regexpMatch(
+  WasmExternRef? regexp,
+  WasmExternRef? string,
+  WasmI32 start,
+  WasmI32 asPrefix,
+) {
+  final pattern = regexp!.internalize().toObject() as EmbedderRegexp;
+  final match = pattern.match(
+    WasmStringImplementation.fromExtern(string),
+    start.toIntUnsigned(),
+    asPrefix.toBool(),
+  );
+  if (match == null) return WasmExternRef.nullRef;
+  return WasmAnyRef.fromObject(match).externalize();
+}
+
+@pragma('wasm:export', 'regexpMatchGetStart')
+WasmI32 regexpMatchGetStart(WasmExternRef? match) {
+  final m = match!.internalize().toObject() as EmbedderRegexpMatch;
+  return WasmI32.fromInt(m.start);
+}
+
+@pragma('wasm:export', 'regexpMatchGetEnd')
+WasmI32 regexpMatchGetEnd(WasmExternRef? match) {
+  final m = match!.internalize().toObject() as EmbedderRegexpMatch;
+  return WasmI32.fromInt(m.end);
+}
+
+@pragma('wasm:export', 'regexpMatchGetGroupCount')
+WasmI32 regexpMatchGetGroupCount(WasmExternRef? match) {
+  final m = match!.internalize().toObject() as EmbedderRegexpMatch;
+  return WasmI32.fromInt(m.groupCount);
+}
+
+@pragma('wasm:export', 'regexpMatchGetGroup')
+WasmExternRef? regexpMatchGetGroup(WasmExternRef? match, WasmI32 index) {
+  final m = match!.internalize().toObject() as EmbedderRegexpMatch;
+  final group = m.group(index.toIntUnsigned());
+  if (group == null) return WasmExternRef.nullRef;
+  return group.externalize();
+}
+
+@pragma('wasm:export', 'regexpMatchGetNamedGroups')
+WasmI32 regexpMatchGetNamedGroups(WasmExternRef? match) {
+  final m = match!.internalize().toObject() as EmbedderRegexpMatch;
+  return WasmI32.fromInt(m.pattern.groupIndicesByName.length);
+}
+
+@pragma('wasm:export', 'regexpMatchGetGroupName')
+WasmExternRef regexpMatchGetGroupName(WasmExternRef? match, WasmI32 index) {
+  final m = match!.internalize().toObject() as EmbedderRegexpMatch;
+  // SDK contract: [index] is between 0 and namedGroups (exclusive), counting
+  // only the *named* groups in capture-order — not the slot in groupNames
+  // (index 0 there is the unnamed whole match).
+  var remaining = index.toIntUnsigned();
+  for (var i = 1; i < m.pattern.groupNames.length; i++) {
+    final name = m.pattern.groupNames[i];
+    if (name == null) continue;
+    if (remaining == 0) {
+      // The parser stores plain Dart strings; the SDK expects one of our
+      // string implementations on the other side of the boundary.
+      return WasmStringImplementation.fromDartString(name).externalize();
+    }
+    remaining--;
+  }
+  // SDK contract: never called with an out-of-range index; guard anyway so a
+  // bad call stays non-fatal.
+  return Latin1String.empty.externalize();
+}
+
+@pragma('wasm:export', 'regexpMatchGetGroupByName')
+WasmExternRef? regexpMatchGetGroupByName(WasmExternRef? match, WasmI32 nameIndex) {
+  final m = match!.internalize().toObject() as EmbedderRegexpMatch;
+  // Same index space as regexpMatchGetGroupName: the nameIndex-th named group.
+  var remaining = nameIndex.toIntUnsigned();
+  String? name;
+  for (var i = 1; i < m.pattern.groupNames.length; i++) {
+    final candidate = m.pattern.groupNames[i];
+    if (candidate == null) continue;
+    if (remaining == 0) {
+      name = candidate;
+      break;
+    }
+    remaining--;
+  }
+  final groupIndex = name == null ? null : m.pattern.groupIndicesByName[name];
+  if (groupIndex == null) return WasmExternRef.nullRef;
+  final group = m.group(groupIndex);
+  if (group == null) return WasmExternRef.nullRef;
+  return group.externalize();
+}
+
+@pragma('wasm:export', 'stringReplaceAllRegExp')
+WasmExternRef stringReplaceAllRegExp(
+  WasmExternRef? string,
+  WasmExternRef? needle,
+  WasmExternRef? replacement,
+) {
+  final pattern = needle!.internalize().toObject() as EmbedderRegexp;
+  return pattern
+      .replaceAllRegExp(
+        WasmStringImplementation.fromExtern(string),
+        WasmStringImplementation.fromExtern(replacement),
+      )
+      .externalize();
 }

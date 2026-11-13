@@ -13,6 +13,10 @@ use wit_bindgen_core::wit_parser::{
 use wit_bindgen_core::{uwrite, uwriteln};
 
 pub struct DartSource<'a> {
+    /// Emitted before the imports in the header: a `library;` directive
+    /// must precede every other directive, so package docs land here
+    /// rather than in the definitions.
+    pub preamble: String,
     pub header: String,
     pub import_map: &'a ImportMap,
     definitions: String,
@@ -25,6 +29,7 @@ pub struct DartSource<'a> {
 impl<'a> DartSource<'a> {
     pub fn new(map: &'a ImportMap) -> Self {
         Self {
+            preamble: Default::default(),
             header: Default::default(),
             import_map: map,
             definitions: Default::default(),
@@ -357,6 +362,7 @@ impl<'a> DartSource<'a> {
 impl Display for DartSource<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("// ignore_for_file: type=warning\n")?;
+        f.write_str(&self.preamble)?;
         f.write_str(&self.header)?;
         f.write_str("\n")?;
         f.write_str(&self.definitions)
@@ -364,7 +370,7 @@ impl Display for DartSource<'_> {
 }
 
 #[derive(Default, Debug)]
-pub struct DartDefinition(String);
+pub struct DartDefinition(pub String);
 
 impl DartDefinition {
     pub fn imported_identifier<I: Display>(

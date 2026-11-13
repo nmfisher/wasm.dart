@@ -317,9 +317,8 @@ final class StreamReadState<T extends List<Object?>> {
   final int _elementSize;
   int _readBufferSize = -1;
 
-  // If we have an allocated read buffer.
+  // If we're in the waiting state, a pending read.
   _PendingStreamBuffer? _pendingRead;
-  var _waitingForRead = false;
   var _dropped = false;
 
   new(this._controller, this._vtable, this._task, this._id, int bufferSize)
@@ -327,14 +326,14 @@ final class StreamReadState<T extends List<Object?>> {
     _readBufferSize = max(bufferSize ~/ _elementSize, 1);
 
     _task.readStreams[_id] = this;
+    // A read that blocks parks this task on its waitable set, so the
+    // readable end has to be a member of that set - exactly like the
+    // writable end in `newReadableStream`. Without the join, a host-side
+    // producer can set its StreamRead event, but the event is never
+    // delivered to the set the task waits on: the guest sleeps forever
+    // (the first host-provided readable stream deadlocks).
     _task.waitable.addWaitable(WasmI32.fromInt(_id));
-    _controller
-      ..onResume = _resume
-      ..onCancel = () {
-        if (!_waitingForRead && !_dropped) {
-          _completeClose();
-        }
-      };
+    _controller.onResume = _resume;
     _startReading();
   }
 
@@ -359,23 +358,19 @@ final class StreamReadState<T extends List<Object?>> {
   }
 
   void _resume() {
-    if (!_dropped && !_waitingForRead) {
+    if (!_dropped) {
       _startReading();
     }
   }
 
   void dispatchEvent(int code) {
-    _waitingForRead = false;
     _dispatchEvent(code, true);
   }
 
   void _dispatchEvent(int code, bool async) {
     readLoop:
     while (true) {
-      if (code == blockedCode) {
-        _waitingForRead = true;
-        break;
-      }
+      if (code == blockedCode) break;
 
       final eventCode = CopyResult.values[code & 0x0f];
       final elementsRead = code >>> 4;
@@ -408,23 +403,13 @@ final class StreamReadState<T extends List<Object?>> {
   }
 
   void _forwardData(bool forwardSynchronously, int elementsRead) {
-    if (_pendingRead case final pending? when elementsRead > 0) {
+    if (_pendingRead case final pending?) {
       final chunk = _vtable.readFromBuffer(
         pending.startPointer + pending.acknowledged * _elementSize,
         elementsRead,
       );
       pending.advance(elementsRead);
-      if (pending.remaining == 0) {
-        if (pending.totalLength > 0) {
-          _vtable.freeBuffer(
-            pending.startPointer,
-            pending.totalLength,
-            pending.totalLength,
-            pending.totalLength,
-          );
-        }
-        _pendingRead = null;
-      }
+      if (pending.remaining == 0) _pendingRead = null;
 
       forwardSynchronously
           ? _controller.addSync(chunk)
@@ -433,15 +418,24 @@ final class StreamReadState<T extends List<Object?>> {
   }
 
   void _completeClose() {
+    // Idempotent: the dropped event and the task's own teardown can both
+    // route here, and a second pass would free the pending read's buffer
+    // twice (a talc double-deallocate crashes the guest).
+    if (_dropped) return;
     if (_pendingRead case final pending? when pending.totalLength > 0) {
+      _pendingRead = null;
+      // Reads copy elements out eagerly (`readFromBuffer` frees each
+      // element's own allocations, e.g. strings, as it copies), and a
+      // blocked read's unwritten region holds no elements at all - so
+      // the element region to free at close is always empty; only the
+      // buffer itself is freed.
       _vtable.freeBuffer(
         pending.startPointer,
         pending.totalLength,
-        pending.acknowledged,
-        pending.totalLength,
+        0,
+        0,
       );
     }
-    _pendingRead = null;
 
     _vtable.dropReadable(_id);
     _task.readStreams.remove(_id);

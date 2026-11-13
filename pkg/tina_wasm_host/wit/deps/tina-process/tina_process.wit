@@ -1,0 +1,106 @@
+// The `tina:process` host interface: the engine's process port
+// (`tina_core.ProcessPort`) served by the host, because WASI has no
+// process spawn. Spec: docs/tina_process.md.
+//
+// The access profile travels with every request; the host evaluates it
+// before any process exists and is the only side that can spawn. An
+// `ask` verdict returns to the engine as an approval request it answers
+// with `respond` - the host cannot call back into a blocked guest.
+
+package tina:process@1.0.0;
+
+interface types {
+    /// How one command-pattern rule judges a command line.
+    enum verdict {
+        allow,
+        deny,
+        ask,
+    }
+
+    /// One access-profile rule: a conservative regular expression the
+    /// host anchors to the entire command line. Ordered list; the first
+    /// match decides; no match asks.
+    record rule {
+        pattern: string,
+        verdict: verdict,
+    }
+
+    /// The policy table the engine sends with every spawn.
+    record access-profile {
+        rules: list<rule>,
+    }
+
+    /// One spawn request. `argv` is literal (no shell); `cwd` is a guest
+    /// path resolved against the runner's preopens; `env` merges over
+    /// the inherited environment; `stdin` is written then closed.
+    record spawn-request {
+        argv: list<string>,
+        cwd: option<string>,
+        env: list<tuple<string, string>>,
+        stdin: option<list<u8>>,
+        profile: access-profile,
+    }
+
+    /// A child the host started: the id `wait`/`kill` address, plus the
+    /// output streams, delivered the way `tina:http` delivers bodies.
+    record started {
+        id: u64,
+        stdout: stream<u8>,
+        stderr: stream<u8>,
+    }
+
+    /// An `ask` verdict surfaced to the engine: nothing runs until the
+    /// engine answers `respond`. `command` is the joined command line.
+    record approval-request {
+        id: u64,
+        command: string,
+        reason: string,
+    }
+
+    /// The policy verdicts the engine sees. Refusal is an outcome with a
+    /// reason to surface, not an error.
+    variant outcome {
+        started(started),
+        approval(approval-request),
+        denied(string),
+    }
+
+    /// How the process ended: an exit code, or termination by `signal`.
+    variant exit {
+        code(u32),
+        signal(u32),
+    }
+
+    /// Host-side failure (missing binary, bad cwd, ...): a message the
+    /// engine can surface verbatim, never a raw OS error.
+    variant error {
+        message(string),
+    }
+}
+
+interface process {
+    use types.{spawn-request, outcome, exit, error};
+
+    /// Ask the host to run `req`. The profile is evaluated first: allow
+    /// starts the child, deny refuses with the rule, ask (or no match)
+    /// returns an approval request the engine must answer.
+    spawn: async func(req: spawn-request) -> result<outcome, error>;
+
+    /// Answer an approval request. `allow` spawns now and reports
+    /// `started`; anything else refuses the spawn.
+    respond: async func(approval: u64, allow: bool) -> result<outcome, error>;
+
+    /// Resolve when the process exits, and reap it. Every started
+    /// process is eventually waited.
+    wait: async func(id: u64) -> result<exit, error>;
+
+    /// Terminate the process (SIGKILL on POSIX hosts). Idempotent.
+    kill: async func(id: u64) -> result<_, error>;
+}
+
+/// The host-side world used to generate the Rust bindings. Like
+/// `tina:http`'s, it holds only the custom import; WASI is linked
+/// separately through `wasmtime_wasi::p3::add_to_linker`.
+world tina-process-host {
+    import process;
+}
