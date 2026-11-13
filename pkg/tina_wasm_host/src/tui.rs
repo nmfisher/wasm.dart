@@ -70,7 +70,11 @@ impl Drop for RawMode {
 /// the terminal wrapping. Returns when the guest's `run` export completes
 /// or fails; crashes, traps and epoch kills exit non-zero after the
 /// terminal is restored.
-pub async fn run_bytes(component_bytes: Vec<u8>, flags: crate::runner::GuestFlags) -> Result<()> {
+pub async fn run_bytes(
+    component_bytes: Vec<u8>,
+    precompiled: Option<&[u8]>,
+    flags: crate::runner::GuestFlags,
+) -> Result<()> {
     // Raw mode BEFORE prepare(): the stdin pump starts inside prepare and
     // must see raw bytes.
     let mut raw = RawMode::enable()?;
@@ -82,7 +86,8 @@ pub async fn run_bytes(component_bytes: Vec<u8>, flags: crate::runner::GuestFlag
         stdout,
         stdin_tx,
         plugin_runtime,
-    } = crate::runner::prepare(&component_bytes, &flags, true, true)?;
+    } = crate::runner::prepare(&component_bytes, precompiled, &flags, true, true)?;
+    crate::runner::boot_mark("tui:prepare-done");
 
     // With epoch interruption on, an unset deadline is 0 — every tick
     // traps. Give instantiation and the run a huge budget; the opt-in kill
@@ -108,6 +113,7 @@ pub async fn run_bytes(component_bytes: Vec<u8>, flags: crate::runner::GuestFlag
     // The tty authority + the crash channel (tina:term): components that
     // do not import tina:term never reach it.
     crate::tina_term::add_to_linker(&mut linker)?;
+    crate::runner::boot_mark("tui:linker-build");
 
     let instance = linker
         .instantiate_async(&mut store, &component)
@@ -123,6 +129,7 @@ pub async fn run_bytes(component_bytes: Vec<u8>, flags: crate::runner::GuestFlag
             eprintln!("tui host: instantiate failed: {e}");
             e
         })?;
+    crate::runner::boot_mark("tui:instantiate");
     let Some(run_instance_index) = component.get_export_index(None, "wasi:cli/run@0.3.0") else {
         wasmtime::bail!("TUI component exports no wasi:cli/run");
     };
@@ -169,6 +176,7 @@ pub async fn run_bytes(component_bytes: Vec<u8>, flags: crate::runner::GuestFlag
     }
 
     let crash = store.data().crash.clone();
+    crate::runner::boot_mark("tui:run-start");
     let body = store.run_concurrent(async |accessor| -> Result<()> {
         let mut results = [Val::Result(Ok(None))];
         run_fn.call_concurrent(accessor, &[], &mut results).await?;

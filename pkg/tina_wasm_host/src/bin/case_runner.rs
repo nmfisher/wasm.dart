@@ -40,6 +40,6 @@ fn main() -> wasmtime::Result<()> {
         let flags = tina_wasm_host::runner::parse_flags(flag_args.into_iter())?;
         let bytes = fs::read(path)
             .map_err(|e| wasmtime::Error::msg(format!("Reading {path}: {e}")))?;
-        tina_wasm_host::runner::run_guest(bytes, flags).await
+        tina_wasm_host::runner::run_guest(bytes, None, flags).await
     })
 }

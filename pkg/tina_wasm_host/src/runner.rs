@@ -13,7 +13,6 @@ use std::{
 use serde::Serialize;
 use serde_json::value::RawValue;
 use wasmtime::{
-    Config,
     Result,
     Store,
     StoreContextMut,
@@ -29,6 +28,40 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiVie
 use crate::policy;
 use crate::tina_plugin;
 
+// ---- boot-phase wall-clock tracing ------------------------------------
+//
+// The packaged host pays real seconds at boot (Cranelift compiling the
+// embedded components, guest boot inside `invoke-test(0)`), and the fix
+// work needs those seconds attributed to phases. With
+// `TINA_WASM_BOOT_TRACE=1` every phase boundary below eprintln's one line
+// to stderr: `tina-wasm-host: boot phase <name> +<delta> ms (total
+// <since-start> ms)`. The first mark anchors t0, so "total" is time from
+// the first mark (main entry), not process exec - the exec+loader cost
+// belongs to the externally measured wall clock, not the phases.
+// Disabled by default: one env lookup per mark, nothing else.
+
+static BOOT_T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+static BOOT_LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+pub fn boot_trace_enabled() -> bool {
+    std::env::var_os("TINA_WASM_BOOT_TRACE").is_some_and(|value| value != "0")
+}
+
+pub fn boot_mark(phase: &str) {
+    let now = std::time::Instant::now();
+    let t0 = *BOOT_T0.get_or_init(|| now);
+    if !boot_trace_enabled() {
+        return;
+    }
+    let mut last = BOOT_LAST.lock().unwrap();
+    let previous = last.unwrap_or(t0);
+    eprintln!(
+        "tina-wasm-host: boot phase {phase:<24} +{:6} ms (total {:6} ms)",
+        (now - previous).as_millis(),
+        (now - t0).as_millis()
+    );
+    *last = Some(now);
+}
 
 /// Builds the config mount for default discovery: a fresh directory
 /// whose `config` entry is a REAL regular file - the resolved contents
@@ -223,6 +256,7 @@ pub(crate) struct Prepared {
 
 pub(crate) fn prepare(
     component_bytes: &[u8],
+    precompiled: Option<&[u8]>,
     flags: &GuestFlags,
     epoch: bool,
     raw_stdin: bool,
@@ -230,35 +264,26 @@ pub(crate) fn prepare(
     let flags = flags;
 
 
-    let mut config = Config::default();
-    config.wasm_gc(true);
-    config.wasm_function_references(true);
-    config.wasm_exceptions(true);
-    // The test export is an async component function: driving its task
-    // (print lowers to a wasi:cli/stdout stream write, a timer lowers to a
-    // wasi:clocks/monotonic-clock wait-for subtask) needs the concurrent
-    // component API.
-    config.wasm_component_model_async(true);
-    // Timers are wait-for subtasks: without this the clock import is a
-    // stub returning an error.
-    config.wasm_component_model_more_async_builtins(true);
+    let mut config = crate::compile_profile::component_config(epoch);
     // The TUI guest compiles to ~4.8 MB of dart2wasm output; Cranelift takes
     // minutes on a contended 4-core box and every bare `tina-wasm-host` boot
-    // paid it again. wasmtime's compilation cache (keyed on module bytes +
-    // config) makes the first boot pay and the rest load. Diagnostic note,
-    // milestone 3: the boot "wedge" reports on this box were exactly this
-    // compilation under CPU starvation - the spinning thread is cranelift.
-    if let Ok(cache) = wasmtime::Cache::from_file(None) {
+    // paid it again. Two layers avoid that: the build-time precompiled
+    // artifact (deserialize below) for every boot of an intact binary, and
+    // wasmtime's compilation cache for the compile-from-source fallback
+    // (first boot pays, later boots load). `Cache::from_file(None)` needs a
+    // config file most machines do not have, and failing silently meant NO
+    // cache at all - fall back to the default config (platform cache dir).
+    // Diagnostic note, milestone 3: the boot "wedge" reports on this box
+    // were exactly this compilation under CPU starvation - the spinning
+    // thread is cranelift.
+    let cache = wasmtime::Cache::from_file(None)
+        .or_else(|_| wasmtime::Cache::new(wasmtime::CacheConfig::new()));
+    if let Ok(cache) = cache {
         config.cache(Some(cache));
-    }
-    if epoch {
-        // The TUI leg's parked-guest kill: an expired deadline traps
-        // (async stores default to yield-and-extend, wired explicitly in
-        // the TUI runner).
-        config.epoch_interruption(true);
     }
 
     let engine = wasmtime::Engine::new(&config)?;
+    boot_mark("host:engine-new");
     // Guest prints go through our own stdout sink (see `TrackedStdout`) so the
     // run loop can tell when a case's write has fully landed.
     let stdout = TrackedStdout::default();
@@ -400,6 +425,7 @@ pub(crate) fn prepare(
     // semantics hold otherwise: import granted, call follows read-context.
     let (import_allowed, call_allowed, read_allowed) =
         policy.plugin_admission("tina/wasm-prompt", flags.plugin_read_context);
+    boot_mark("host:policy+preopens");
 
     wasmtime::ensure!(
         flags.plugin_component.is_some() || !read_allowed,
@@ -467,8 +493,41 @@ pub(crate) fn prepare(
             crash: crate::tina_term::CrashState::default(),
         },
     );
+    boot_mark("host:plugin-runtime+store");
 
-        let component = Component::new(&engine, component_bytes)?;
+        // Prefer the build-time precompiled artifact: deserialize is a
+        // mmap + relocation, not a Cranelift run. SAFETY: the bytes are
+        // frozen into this very binary by build.rs (same build as this
+        // code), produced by the same wasmtime version the lock pins and
+        // the same compile profile (src/compile_profile.rs is included by
+        // build.rs too); wasmtime additionally validates the embedded
+        // serialization version + compile-settings hash before any code
+        // is used (`serialization::check_compatible`), so a mismatched
+        // artifact errors here instead of executing.
+        let component = match precompiled {
+            Some(artifact) if !artifact.is_empty() => {
+                match unsafe { Component::deserialize(&engine, artifact) } {
+                    Ok(component) => {
+                        boot_mark("host:component-deserialize");
+                        component
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "tina-wasm-host: precompiled artifact rejected \
+                             ({error}); compiling from the embedded component"
+                        );
+                        let component = Component::new(&engine, component_bytes)?;
+                        boot_mark("host:component-compile");
+                        component
+                    }
+                }
+            }
+            _ => {
+                let component = Component::new(&engine, component_bytes)?;
+                boot_mark("host:component-compile");
+                component
+            }
+        };
     Ok(Prepared {
         engine,
         store,
@@ -693,7 +752,11 @@ pub(crate) fn build_linker(
 
 /// The headless pipes leg: the case-runner protocol over the embedded
 /// engine component (`docs/capability_merger.md`).
-pub async fn run_guest(component_bytes: Vec<u8>, flags: GuestFlags) -> Result<()> {
+pub async fn run_guest(
+    component_bytes: Vec<u8>,
+    precompiled: Option<&[u8]>,
+    flags: GuestFlags,
+) -> Result<()> {
     let Prepared {
         engine,
         mut store,
@@ -701,7 +764,7 @@ pub async fn run_guest(component_bytes: Vec<u8>, flags: GuestFlags) -> Result<()
         stdout,
         stdin_tx: _,
         plugin_runtime,
-    } = prepare(&component_bytes, &flags, false, false)?;
+    } = prepare(&component_bytes, precompiled, &flags, false, false)?;
     let Some(run_instance_index) = component.get_export_index(None, "wasmdart:tests/tested-module")
     else {
         wasmtime::bail!("Missing tests export");
@@ -718,7 +781,9 @@ pub async fn run_guest(component_bytes: Vec<u8>, flags: GuestFlags) -> Result<()
 
 
     let linker = build_linker(&engine, &plugin_runtime)?;
+    boot_mark("host:linker-build");
     let instance = linker.instantiate_async(&mut store, &component).await?;
+    boot_mark("host:instantiate");
     let count = instance.get_func(&mut store, count_test_idx).unwrap();
     let invoke = instance.get_func(&mut store, invoke_test_idx).unwrap();
 
@@ -742,9 +807,13 @@ pub async fn run_guest(component_bytes: Vec<u8>, flags: GuestFlags) -> Result<()
                 };
                 count
             };
+            boot_mark("guest:count-tests");
 
             for i in 0..num_tests {
                 post_event(&TestEvent::TestStart { test: i });
+                if i == 0 {
+                    boot_mark("guest:invoke-start");
+                }
                 invoke
                     .call_concurrent(accessor, &[Val::U32(i)], &mut [])
                     .await?;
@@ -888,12 +957,24 @@ impl Drop for TrackedStdoutStream {
     }
 }
 
+/// Set once the guest's first `{"type":"ready",...}` line has passed
+/// through the stdout sink, so boot tracing can timestamp first-ready
+/// without parsing the stream (the marker is matched per write chunk,
+/// which is how the guest emits it - one print, one write).
+static BOOT_READY_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+const BOOT_READY_MARKER: &[u8] = br#""type":"ready""#;
+
 impl tokio::io::AsyncWrite for TrackedStdoutStream {
     fn poll_write(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
+        if buf.windows(BOOT_READY_MARKER.len()).any(|w| w == BOOT_READY_MARKER)
+            && !BOOT_READY_SEEN.swap(true, Ordering::Relaxed)
+        {
+            boot_mark("guest:ready");
+        }
         Poll::Ready(std::io::stdout().write(buf))
     }
 

@@ -27,6 +27,13 @@ futures = "0.3"
 bytes = "1"
 libc = "0.2"
 
+# The build script precompiles the embedded components with the SAME
+# wasmtime the runtime embeds (one version via the lock), so the
+# serialized artifacts deserialize at boot instead of JIT-compiling.
+# See build.rs and src/compile_profile.rs.
+[build-dependencies]
+wasmtime = { version = "47.0.2" }
+
 [[bin]]
 name = "tina-wasm-host"
 path = "src/main.rs"

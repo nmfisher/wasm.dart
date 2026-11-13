@@ -3,6 +3,7 @@
 //! (embedded engine, default discovery) and the case suite's
 //! `tina-case-runner` (one positional component under the
 //! `wasmdart:tests` case protocol).
+pub mod compile_profile;
 pub mod plugin_loader;
 pub mod policy;
 pub mod runner;

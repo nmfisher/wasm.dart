@@ -19,6 +19,9 @@
 use std::env;
 
 fn main() -> wasmtime::Result<()> {
+    // Anchors the boot-phase trace (TINA_WASM_BOOT_TRACE=1; see
+    // `runner::boot_mark`) - the first mark IS t0 for every later one.
+    tina_wasm_host::runner::boot_mark("main:start");
     // Wasmtime's concurrent (async component model) internals log under the
     // `wasmtime` target; `RUST_LOG=wasmtime=trace` is invaluable when a guest
     // stalls in the event loop.
@@ -45,13 +48,23 @@ fn main() -> wasmtime::Result<()> {
         };
         if headless {
             let flags = tina_wasm_host::runner::parse_flags(args)?;
+            tina_wasm_host::runner::boot_mark("main:flags-parsed");
             let embedded = include_bytes!(concat!(env!("OUT_DIR"), "/engine.component.wasm"));
             wasmtime::ensure!(
                 !embedded.is_empty(),
                 "no engine component embedded in this build; rebuild with \
                  TINA_WASM_HOST_ENGINE=<component> and cargo build (~2 minutes incremental)"
             );
-            tina_wasm_host::runner::run_guest(embedded.to_vec(), flags).await
+            // The build-time precompiled twin of the component (see
+            // build.rs): deserialize instead of JIT-compiling at boot.
+            let precompiled =
+                include_bytes!(concat!(env!("OUT_DIR"), "/engine.component.cwasm"));
+            tina_wasm_host::runner::run_guest(
+                embedded.to_vec(),
+                Some(precompiled.as_slice()),
+                flags,
+            )
+            .await
         } else {
             let flags = tina_wasm_host::runner::parse_flags(args)?;
             let embedded = include_bytes!(concat!(env!("OUT_DIR"), "/tui.component.wasm"));
@@ -60,7 +73,9 @@ fn main() -> wasmtime::Result<()> {
                 "no TUI component embedded in this build; rebuild with \
                  TINA_WASM_HOST_TUI=<component> and cargo build (~2 minutes incremental)"
             );
-            tina_wasm_host::tui::run_bytes(embedded.to_vec(), flags).await
+            let precompiled = include_bytes!(concat!(env!("OUT_DIR"), "/tui.component.cwasm"));
+            tina_wasm_host::tui::run_bytes(embedded.to_vec(), Some(precompiled.as_slice()), flags)
+                .await
         }
     })
 }
