@@ -59,17 +59,31 @@ pub fn component_config(epoch: bool) -> Config {
         // Compile-visible: epoch checks are emitted into the code.
         config.epoch_interruption(true);
     }
-    // The dart2wasm guest's object heap lives in the wasm-GC heap. Its
-    // reservation defaults follow the LINEAR-MEMORY tunables, whose
-    // platform heuristics under-provisioned it on macOS arm64: the
-    // models.dev cache parses into ~27 MB of Dart objects and boot died
-    // with "GC heap out of memory: no capacity for allocation of
-    // 26,691,124 bytes" inside PreloadedAppIo.load - while the same data
-    // boots on linux x64. Reservations are virtual address space only
-    // (lazily committed), so generous values cost nothing at runtime.
-    // Note wasmtime's coupling rule: setting ANY gc_heap_* tunable makes
-    // the others stop following memory_* defaults, so set all three.
-    config.gc_heap_reservation(8 << 30);
+    // The dart2wasm guest's object heap lives in the wasm-GC heap, which
+    // starts at 0 bytes and grows by doubling. Two macOS arm64 incident
+    // classes traced here: (1) boot OOM at a 26.7 MB models-cache array,
+    // (2) boot OOM at a 50 MB workspace file read (PreloadedAppIo loads
+    // every .tina file and String.fromCharCodes copies it - peak is
+    // ~3-4x file size) plus a tool-time readFileBytes trap. Both failed
+    // with wasmtime's GcHeapOutOfMemory even though the DEFAULT 4 GiB
+    // reservation was already in place - i.e. the grow/commit step
+    // itself is what fails on macOS arm64; linux grows to 64+ MB
+    // workloads without complaint (verified: 64 MB .tina file boots
+    // ready). So instead of relying on grow-on-demand:
+    // - initial heap 256 MiB: typical workloads (the whole reported
+    //   class) allocate inside the pre-existing heap and never hit the
+    //   grow path. Accessible-but-untouched pages cost no RAM; RSS
+    //   grows with use.
+    // - reservation pinned to 4 GiB == wasmtime's hard GC-heap grow cap
+    //   (grow_gc_heap saturates at 1<<32): any growth that does happen
+    //   is an in-reservation page commit, never a move/remap.
+    // All three growth tunables are set because wasmtime switches the
+    // others off their memory_* mirrors once any gc_heap_* is explicit.
+    // Virtual reservations are lazily committed; only touched pages cost
+    // RAM. Note: these tunables are part of the artifact settings hash,
+    // and build.rs shares this function, so keys stay consistent.
+    config.gc_heap_initial_size(256 << 20);
+    config.gc_heap_reservation(4 << 30);
     config.gc_heap_reservation_for_growth(4 << 30);
     config.gc_heap_may_move(true);
     if let Some(triple) = explicit_triple() {

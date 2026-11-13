@@ -53,10 +53,17 @@ while [ "$i" -le "$RUNS" ]; do
     --preopen=.="$WS" --preopen=config="$CFG" \
     --env=TINA_LLM_ENDPOINT=http://127.0.0.1:8741 \
     --env=TINA_LLM_TOKEN=x \
-    < /tmp/boot-meas/in > /tmp/boot-meas/out 2> /tmp/boot-meas/trace
-  rc=$?
+    < /tmp/boot-meas/in > /tmp/boot-meas/out 2> /tmp/boot-meas/trace &
+  pid=$!
+  hwm=0
+  while kill -0 $pid 2>/dev/null; do
+    v=$(awk '/VmHWM/{print $2}' /proc/$pid/status 2>/dev/null || echo 0)
+    [ "$v" -gt "$hwm" ] 2>/dev/null && hwm=$v || true
+    sleep 0.05
+  done
+  wait $pid; rc=$?
   end=$(date +%s%N)
-  echo "--- $LABEL run $i (rc=$rc, models-cache=$MODELS)"
+  echo "--- $LABEL run $i (rc=$rc, models-cache=$MODELS, peak RSS ${hwm} kB)"
   echo "wall: $(( (end - start) / 1000000 ))ms exec-to-exit"
   cat /tmp/boot-meas/trace
   i=$(( i + 1 ))
