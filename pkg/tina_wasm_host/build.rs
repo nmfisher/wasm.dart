@@ -80,6 +80,18 @@ fn precompile(component_out: &Path, artifact_name: &str, epoch: bool) {
         .unwrap_or_else(|error| panic!("building the precompile engine: {error}"));
     match engine.precompile_component(&bytes) {
         Ok(artifact) => {
+            // Visible in the build log: the twin sizes and the codegen
+            // decision (see compile_profile::explicit_triple - the macOS
+            // arm64 wedge investigation needs these facts per platform).
+            let triple = "native (no explicit triple; see compile_profile)";
+            println!(
+                "cargo:warning=precompiled {} -> {} bytes ({} bytes source, \
+                 codegen: {})",
+                component_out.display(),
+                artifact.len(),
+                bytes.len(),
+                triple
+            );
             fs::write(&artifact_out, artifact).unwrap_or_else(|error| {
                 panic!("writing the precompiled artifact {artifact_out:?}: {error}")
             });

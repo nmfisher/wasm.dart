@@ -56,11 +56,26 @@ pub fn boot_mark(phase: &str) {
     let mut last = BOOT_LAST.lock().unwrap();
     let previous = last.unwrap_or(t0);
     eprintln!(
-        "tina-wasm-host: boot phase {phase:<24} +{:6} ms (total {:6} ms)",
+        "tina-wasm-host: boot phase {phase:<28} +{:6} ms (total {:6} ms)",
         (now - previous).as_millis(),
         (now - t0).as_millis()
     );
     *last = Some(now);
+}
+
+/// The precompiled-twin gate. `TINA_WASM_AOT=0` disables deserialize and
+/// forces the compile path - the diagnosis hatch that separates a
+/// deserialize/mmap problem from a codegen problem without rebuilding
+/// (see the macOS arm64 wedge investigation on f37a247).
+pub fn aot_bytes(precompiled: &'static [u8]) -> Option<&'static [u8]> {
+    if std::env::var_os("TINA_WASM_AOT").is_some_and(|v| v == "0") {
+        eprintln!(
+            "tina-wasm-host: TINA_WASM_AOT=0 - skipping the precompiled \
+             artifact; compiling from the embedded component"
+        );
+        return None;
+    }
+    (!precompiled.is_empty()).then_some(precompiled)
 }
 
 /// Builds the config mount for default discovery: a fresh directory
@@ -281,6 +296,7 @@ pub(crate) fn prepare(
     if let Ok(cache) = cache {
         config.cache(Some(cache));
     }
+    boot_mark("host:cache-setup");
 
     let engine = wasmtime::Engine::new(&config)?;
     boot_mark("host:engine-new");
@@ -506,6 +522,7 @@ pub(crate) fn prepare(
         // artifact errors here instead of executing.
         let component = match precompiled {
             Some(artifact) if !artifact.is_empty() => {
+                boot_mark("host:deserialize-start");
                 match unsafe { Component::deserialize(&engine, artifact) } {
                     Ok(component) => {
                         boot_mark("host:component-deserialize");
@@ -516,6 +533,7 @@ pub(crate) fn prepare(
                             "tina-wasm-host: precompiled artifact rejected \
                              ({error}); compiling from the embedded component"
                         );
+                        boot_mark("host:fallback-compile-start");
                         let component = Component::new(&engine, component_bytes)?;
                         boot_mark("host:component-compile");
                         component
@@ -523,6 +541,7 @@ pub(crate) fn prepare(
                 }
             }
             _ => {
+                boot_mark("host:compile-start");
                 let component = Component::new(&engine, component_bytes)?;
                 boot_mark("host:component-compile");
                 component

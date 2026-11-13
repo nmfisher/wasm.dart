@@ -24,17 +24,22 @@ visible, so the two legs produce different artifact keys on purpose.
 
 use wasmtime::Config;
 
-/// The host triple as a wasmtime target string, or `None` off the
-/// supported set (then wasmtime's native default applies and artifacts
-/// stay build-machine-local).
-fn host_triple() -> Option<&'static str> {
-    match (std::env::consts::ARCH, std::env::consts::OS) {
-        ("x86_64", "linux") => Some("x86_64-unknown-linux-gnu"),
-        ("aarch64", "linux") => Some("aarch64-unknown-linux-gnu"),
-        ("x86_64", "macos") => Some("x86_64-apple-darwin"),
-        ("aarch64", "macos") => Some("aarch64-apple-darwin"),
-        _ => None,
-    }
+/// No explicit target triple: native codegen everywhere, deliberately.
+///
+/// History (f37a247 follow-up): pinning `x86_64-unknown-linux-gnu` made
+/// this box's Cranelift ~166x slower at compiling the same engine
+/// component (95.5 s cold vs 0.57 s native; the disk-cache warm hit is
+/// 575 ms, so the difference is compile time, not the cache), and the
+/// macOS arm64 release build that pinned `aarch64-apple-darwin` (baseline
+/// aarch64 codegen) WEDGED at boot while the pre-AOT Mac build (native
+/// codegen) boots fine. Native is the pre-AOT, validated-on-all-platforms
+/// configuration, and deserialization does not care: build.rs and the
+/// runtime share this function, so the compile-settings hash agrees, and
+/// an artifact built on machine A still cleanly rejects (never
+/// wrong-loads) on machine B whose native features differ - the runtime
+/// then compiles natively, fast.
+fn explicit_triple() -> Option<&'static str> {
+    None
 }
 
 /// The component compile profile for one packaged component.
@@ -54,14 +59,7 @@ pub fn component_config(epoch: bool) -> Config {
         // Compile-visible: epoch checks are emitted into the code.
         config.epoch_interruption(true);
     }
-    // Explicit triple, not the default: a configured target disables the
-    // inference of the BUILD machine's CPU features, so the serialized
-    // artifacts stay loadable on every machine of the same OS+arch
-    // instead of only the builder's CPU. Both `build.rs` and the runtime
-    // call this same function, so the compile-settings hash agrees
-    // whenever the binary is intact; a cross-arch copy still fails
-    // `check_compatible` and falls back to compiling from source.
-    if let Some(triple) = host_triple() {
+    if let Some(triple) = explicit_triple() {
         if let Err(error) = config.target(triple) {
             panic!("unsupported wasmtime target triple {triple}: {error}");
         }

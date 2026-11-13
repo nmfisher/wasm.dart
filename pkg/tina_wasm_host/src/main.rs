@@ -18,6 +18,18 @@
 
 use std::env;
 
+// The embedded components and their precompiled twins. Module-level
+// statics on purpose: `include_bytes!` inside a function body creates an
+// anonymous static that each codegen unit references separately, and the
+// linker keeps every copy - the macOS release build measured 223.6 MB
+// (every artifact embedded 3x) until these were hoisted here. Named
+// statics are singletons: one copy each (~61 MB total in release).
+static ENGINE_COMPONENT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/engine.component.wasm"));
+static ENGINE_PRECOMPILED: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/engine.component.cwasm"));
+static TUI_COMPONENT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tui.component.wasm"));
+static TUI_PRECOMPILED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tui.component.cwasm"));
+
 fn main() -> wasmtime::Result<()> {
     // Anchors the boot-phase trace (TINA_WASM_BOOT_TRACE=1; see
     // `runner::boot_mark`) - the first mark IS t0 for every later one.
@@ -49,7 +61,7 @@ fn main() -> wasmtime::Result<()> {
         if headless {
             let flags = tina_wasm_host::runner::parse_flags(args)?;
             tina_wasm_host::runner::boot_mark("main:flags-parsed");
-            let embedded = include_bytes!(concat!(env!("OUT_DIR"), "/engine.component.wasm"));
+            let embedded = ENGINE_COMPONENT;
             wasmtime::ensure!(
                 !embedded.is_empty(),
                 "no engine component embedded in this build; rebuild with \
@@ -57,25 +69,28 @@ fn main() -> wasmtime::Result<()> {
             );
             // The build-time precompiled twin of the component (see
             // build.rs): deserialize instead of JIT-compiling at boot.
-            let precompiled =
-                include_bytes!(concat!(env!("OUT_DIR"), "/engine.component.cwasm"));
+            // TINA_WASM_AOT=0 forces the compile path (diagnosis hatch:
+            // A/B the deserialize path without rebuilding).
             tina_wasm_host::runner::run_guest(
                 embedded.to_vec(),
-                Some(precompiled.as_slice()),
+                tina_wasm_host::runner::aot_bytes(ENGINE_PRECOMPILED),
                 flags,
             )
             .await
         } else {
             let flags = tina_wasm_host::runner::parse_flags(args)?;
-            let embedded = include_bytes!(concat!(env!("OUT_DIR"), "/tui.component.wasm"));
+            let embedded = TUI_COMPONENT;
             wasmtime::ensure!(
                 !embedded.is_empty(),
                 "no TUI component embedded in this build; rebuild with \
                  TINA_WASM_HOST_TUI=<component> and cargo build (~2 minutes incremental)"
             );
-            let precompiled = include_bytes!(concat!(env!("OUT_DIR"), "/tui.component.cwasm"));
-            tina_wasm_host::tui::run_bytes(embedded.to_vec(), Some(precompiled.as_slice()), flags)
-                .await
+            tina_wasm_host::tui::run_bytes(
+                embedded.to_vec(),
+                tina_wasm_host::runner::aot_bytes(TUI_PRECOMPILED),
+                flags,
+            )
+            .await
         }
     })
 }
