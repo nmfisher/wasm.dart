@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{collections::HashSet, rc::Rc};
 use std::{fmt::Write, mem};
 
 use heck::{AsLowerCamelCase, AsUpperCamelCase};
@@ -59,6 +59,7 @@ pub struct ExportedFunctionMode<'a> {
     pub async_return_name: &'a str,
     pub async_return_params: &'a mut Option<Vec<WasmType>>,
     pub allocated_return_value: &'a mut Option<(ArchitectureSize, Alignment)>,
+    pub imported_resource_ids: &'a HashSet<TypeId>,
 }
 
 pub struct PostReturn {}
@@ -525,6 +526,20 @@ if ({is_err}.toBool()) {{
                     Handle::Own(id) => ("Owned", id, true),
                     Handle::Borrow(id) => ("Borrowed", id, false),
                 };
+                let drop_import = if is_owned {
+                    Some(self.drop_function(id))
+                } else {
+                    let imported = match &self.mode {
+                        FunctionMode::Exported(mode) => resource_type_id(resolve, *id)
+                            .is_some_and(|resource| mode.imported_resource_ids.contains(&resource)),
+                        _ => false,
+                    };
+                    if imported {
+                        Some(self.drop_function(id))
+                    } else {
+                        None
+                    }
+                };
 
                 uwrite!(self.definition, "final {tmp} = ");
                 self.definition.imported_identifier(
@@ -537,10 +552,17 @@ if ({is_err}.toBool()) {{
                 let handle_id = operands.pop().unwrap();
                 uwrite!(self.definition, ">({handle_id}.toIntUnsigned()");
                 if is_owned {
-                    let drop_import = self.drop_function(id);
-                    uwrite!(self.definition, ", {drop_import}");
+                    uwrite!(self.definition, ", {}", drop_import.as_ref().unwrap());
                 }
                 uwrite!(self.definition, ");");
+                if !is_owned {
+                    if let Some(drop_import) = drop_import {
+                        uwriteln!(
+                            self.definition,
+                            "_borrowCleanups.add(() => {drop_import}({tmp}.handle));"
+                        );
+                    }
+                }
 
                 results.push(tmp);
             }
@@ -1276,5 +1298,15 @@ final {list} = List.generate({length}.toIntUnsigned(), growable: false, (i) {{
 
     fn is_list_canonical(&self, _resolve: &Resolve, _element: &Type) -> bool {
         false
+    }
+}
+
+fn resource_type_id(resolve: &Resolve, mut id: TypeId) -> Option<TypeId> {
+    loop {
+        match &resolve.types[id].kind {
+            wit_bindgen_core::wit_parser::TypeDefKind::Resource => return Some(id),
+            wit_bindgen_core::wit_parser::TypeDefKind::Type(Type::Id(next)) => id = *next,
+            _ => return None,
+        }
     }
 }

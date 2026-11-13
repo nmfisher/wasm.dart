@@ -1,0 +1,40 @@
+//! Build-time embedding of the Tina engine component (issue #85 packaging).
+//!
+//! Setting `TINA_WASM_HOST_ENGINE` to a component file at build time embeds
+//! those bytes into the binary (`include_bytes!` of a file in `OUT_DIR`), so
+//! one executable carries both host and engine. Without the variable the
+//! build embeds a placeholder and the binary requires `--engine=<path>` (or
+//! a positional path) at startup. Plugin components are never embedded:
+//! they are the dynamic inputs.
+
+use std::{env, fs, path::Path};
+
+fn main() {
+    println!("cargo:rerun-if-env-changed=TINA_WASM_HOST_ENGINE");
+    let out = Path::new(&env::var("OUT_DIR").expect("OUT_DIR")).join("engine.component.wasm");
+    match env::var_os("TINA_WASM_HOST_ENGINE") {
+        Some(path) => {
+            let path = Path::new(&path);
+            // The env value alone does not trigger a rebuild when it is
+            // unchanged: watch the FILE, so a rebuilt engine component is
+            // re-embedded instead of silently shipping stale bytes.
+            println!("cargo:rerun-if-changed={}", path.display());
+            fs::copy(path, &out)
+                .unwrap_or_else(|error| panic!("copying embedded engine {path:?}: {error}"));
+        }
+        None => fs::write(&out, b"").expect("writing the empty engine placeholder"),
+    }
+
+    // The Option 2 TUI component embeds the same way (docs/wasm_tui.md).
+    println!("cargo:rerun-if-env-changed=TINA_WASM_HOST_TUI");
+    let tui_out = Path::new(&env::var("OUT_DIR").expect("OUT_DIR")).join("tui.component.wasm");
+    match env::var_os("TINA_WASM_HOST_TUI") {
+        Some(path) => {
+            let path = Path::new(&path);
+            println!("cargo:rerun-if-changed={}", path.display());
+            fs::copy(path, &tui_out)
+                .unwrap_or_else(|error| panic!("copying embedded TUI component {path:?}: {error}"));
+        }
+        None => fs::write(&tui_out, b"").expect("writing the empty TUI placeholder"),
+    }
+}

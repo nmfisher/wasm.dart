@@ -1,0 +1,97 @@
+// The `tina:http` host interface: the engine's HTTP port
+// (`tina_core.HttpClientPort`) served by the host instead of `dart:io`.
+//
+// The host enforces the capability document it was launched with
+// (`docs/capability_merger.md`): the network domain entries are the
+// allowlist. A request to an allowed domain proceeds; an unknown domain
+// returns an approval request the engine answers with `respond` after
+// its approval flow - the same round-trip `tina:process` uses, because
+// the host cannot call back into a blocked guest. `widen` (the
+// `tina:policy` interface) makes a remembered domain grant stick for the
+// rest of the run.
+//
+// One function covers the port's POST and GET: the method travels in the
+// request. The response head (status + headers) arrives first; the body
+// is a component-model byte stream the guest reads incrementally, paired
+// with a future resolving once the whole body has been delivered - the
+// same shape as `wasi:cli/stdin.read-via-stream`, so guests lower it
+// with the stream/future machinery they already use for stdio.
+//
+// 1.1.0: `send` returns an outcome (`sent` / `approval` / `denied`) and
+// `respond` answers an approval, mirroring `tina:process@1.1.0`.
+
+package tina:http@1.1.0;
+
+interface types {
+    /// One outgoing request. `method` is `GET` or `POST` (upper-case, as
+    /// `dart:io` sends it); `url` is absolute; `body` is the request body
+    /// or none for GET.
+    record request {
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: option<list<u8>>,
+    }
+
+    /// The response before its body: status code plus header pairs. Header
+    /// names keep the case the server sent.
+    record response-head {
+        status: u16,
+        headers: list<tuple<string, string>>,
+    }
+
+    /// A request the host sent: the head (status + headers), the body as
+    /// a byte stream, in order, chunked as the network delivers it, and
+    /// a future that resolves with an error when the body transfer
+    /// failed, and successfully once every body byte was delivered.
+    /// Dropping the stream cancels the transfer.
+    record sent {
+        head: response-head,
+        body: stream<u8>,
+        delivered: future<result<_, error>>,
+    }
+
+    /// An approval the domain allowlist parked: nothing is sent until the
+    /// engine answers `respond`. `url` is the request's absolute URL.
+    record approval-request {
+        id: u64,
+        url: string,
+        reason: string,
+    }
+
+    /// The policy verdicts the engine sees. Refusal is an outcome with a
+    /// reason to surface, not an error.
+    variant outcome {
+        sent(sent),
+        approval(approval-request),
+        denied(string),
+    }
+
+    /// Why a request failed before any body: a host-side message, never a
+    /// raw OS error, so guests can surface it verbatim.
+    variant error {
+        message(string),
+    }
+}
+
+interface client {
+    use types.{request, sent, approval-request, outcome, error};
+
+    /// Issue `req`. The domain allowlist is evaluated before anything is
+    /// sent: an allowed domain completes when the response head is
+    /// available (see `sent`); an unknown domain returns an approval
+    /// request the engine must answer.
+    send: async func(req: request) -> result<outcome, error>;
+
+    /// Answer a parked approval. `allow` sends the parked request now and
+    /// reports the outcome; anything else refuses it.
+    respond: async func(approval: u64, allow: bool) -> result<outcome, error>;
+}
+
+/// The host-side world used to generate the Rust bindings. It deliberately
+/// contains nothing else: the runner links WASI separately through
+/// `wasmtime_wasi::p3::add_to_linker`, so this world only describes the
+/// custom host import.
+world tina-http-host {
+    import client;
+}

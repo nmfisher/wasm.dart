@@ -1,0 +1,85 @@
+package tina:plugin-probe@0.1.0;
+
+/// Engine-owned service resource. The plugin receives a borrow for one call.
+interface service-types {
+  resource service;
+}
+
+/// Factory callable on the engine export. It is not part of the plugin's
+/// import capability surface.
+interface service-factory {
+  use service-types.{service};
+  create: func() -> own<service>;
+}
+
+interface engine-service {
+  use service-types.{service};
+  call: func(service: borrow<service>, request: string)
+    -> result<string, service-error>;
+
+  variant service-error {
+    denied,
+    unavailable,
+  }
+}
+
+/// Minimal lifecycle-shaped probe surface. This is not the production
+/// projection of every AgentPlugin hook.
+interface plugin {
+  use engine-service.{service, service-error};
+
+  record descriptor {
+    id: string,
+    description: string,
+  }
+
+  variant plugin-error {
+    rejected(string),
+    failed(string),
+    service(service-error),
+  }
+
+  run: func(service: borrow<service>, input: string)
+    -> result<string, plugin-error>;
+
+  describe: func() -> descriptor;
+}
+
+/// In the acyclic baseline the runner owns the call order. This world is
+/// deliberately separate from the experimental reentrant composition.
+world engine {
+  export service-types;
+  export service-factory;
+  export engine-service;
+}
+
+/// Compile a separate plugin component against the same engine-service WIT.
+world plugin-component {
+  import engine-service;
+  export plugin;
+}
+
+/// Resource owner used by the guest-to-guest round-trip probe.
+interface token-owner {
+  resource token {
+    constructor(value: u32);
+  }
+  inspect: func(value: borrow<token>) -> u32;
+}
+
+/// A separately compiled component imports the owner's resource type and
+/// returns the same owned handle, exercising ownership transfer through the
+/// runner's shared Store.
+interface token-relay {
+  use token-owner.{token};
+  relay: func(value: own<token>) -> own<token>;
+}
+
+world token-source {
+  export token-owner;
+}
+
+world token-relay-component {
+  import token-owner;
+  export token-relay;
+}

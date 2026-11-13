@@ -1,0 +1,36 @@
+[package]
+name = "tina-wasm-host"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = "1.0.228"
+serde_json = { version = "1.0.150", features = ["raw_value"] }
+# The discovery-time credential lift parses the user's tina config (the
+# same TOML crate wasmtime already pulls, so the lock does not fork).
+toml = "0.9"
+wasmtime = { version = "47.0.2", features = ["cache"] }
+wasmtime-wasi = { version = "47.0.2", features = ["p3"] }
+tokio = { version = "1", features = ["rt", "process", "io-util", "io-std", "time", "macros"] }
+# The `tina:process` host implementation: the access profile's command
+# patterns are the conservative regexes tina_mode's rules use.
+regex = "1"
+env_logger = "0.11.11"
+# The tina:http host implementation. rustls-tls (no native TLS) keeps the
+# host free of an OpenSSL build dependency; `stream` gives response byte
+# streams for SSE-style bodies.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "stream",
+] }
+futures = "0.3"
+bytes = "1"
+libc = "0.2"
+
+[[bin]]
+name = "tina-wasm-host"
+path = "src/main.rs"
+
+[[bin]]
+name = "tina-case-runner"
+path = "src/bin/case_runner.rs"

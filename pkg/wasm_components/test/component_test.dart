@@ -30,6 +30,14 @@ import 'package:test_descriptor/test_descriptor.dart' as d;
 /// in release mode or rewriting the guest's exact-decimal arithmetic - both
 /// changes to what is being tested, not to how long it takes.
 const slowCaseTimeouts = <String, Timeout>{
+  // Debug-mode JIT compiles dominate these cases' wall time (~31s for
+  // `double` on either runner generation, measured); the 30s default
+  // predates the slow-case budget and `double` just misses it.
+  'double': Timeout(Duration(seconds: 90)),
+  // The SIMD kernel: 6 x 200k Float32x4 multiply-add rounds run ~43s on
+  // the debug runner (measured; rounds slow ~1.13x each as the
+  // boxed-Float32x4 heap grows), plus ~15s JIT warmup.
+  'bench_kernel': Timeout(Duration(minutes: 3)),
   'double_parse_rounding': Timeout(Duration(minutes: 5)),
   'double_parse_rounding_bits': Timeout(Duration(seconds: 90)),
 };
@@ -38,17 +46,21 @@ void main() async {
   late String testRunnerExecutable;
 
   setUpAll(() async {
+    // The case suite runs its components under tina-case-runner: the
+    // packaged tina-wasm-host is embedded-only and takes no engine path.
     final cargoBuild = await Process.start('cargo', [
       'build',
       '-p',
-      'test_runner',
+      'tina-wasm-host',
+      '--bin',
+      'tina-case-runner',
     ], mode: .inheritStdio);
     final exitCode = await cargoBuild.exitCode;
     if (exitCode != 0) throw 'Unexpected exit code from cargo: $exitCode';
 
     final exeSuffix = Platform.isWindows ? '.exe' : '';
     testRunnerExecutable = p.normalize(
-      '../../target/debug/test_runner$exeSuffix',
+      '../../target/debug/tina-case-runner$exeSuffix',
     );
   });
 

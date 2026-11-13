@@ -129,12 +129,21 @@ final class ModuleTransformer {
     const timelineReplacer = _TimelineImports();
     if (!_ComponentImport.functionUsed(this, 'timelineStreamEnabled') &&
         !_ComponentImport.functionUsed(this, 'reportTaskEvent')) {
-      final declared = module.imports.functions.firstWhere(
-        (import) =>
-            import.module == 'component' &&
-            import.name == 'implicitImport_timelineReportTaskEvent',
-      );
-      timelineReplacer._stubTimelineReport(this, declared);
+      // dart2wasm DCEs the declared
+      // `component.implicitImport_timelineReportTaskEvent` import itself
+      // when the timeline is unused (observed on stable 3.14.0; the older
+      // edge pin always declared it). Tolerate the missing import by
+      // skipping the stub: the ABI-declared host import stays unused.
+      final declared = module.imports.functions
+          .where(
+            (import) =>
+                import.module == 'component' &&
+                import.name == 'implicitImport_timelineReportTaskEvent',
+          )
+          .toList();
+      if (declared.isNotEmpty) {
+        timelineReplacer._stubTimelineReport(this, declared.single);
+      }
     }
 
     final unusedComponentImports = {

@@ -52,7 +52,7 @@ This compiles `bin/app.dart` to `bin/app.wasm`.
 
 `bin/app.wasm` imports the `wasm:dart/trace@1.0.0` stack-trace dependency every component
 carries (see the note at the top), so run it with a host that links the `wasm:dart/*`
-interfaces - the case suite's Rust runner (`pkg/test_runner`) hosts the case components; a
+interfaces - the case suite's Rust runner (`pkg/tina_wasm_host`) hosts the case components; a
 standalone runner for `wasmtime run`-style execution of arbitrary apps is follow-up work.
 
 For a component with a custom world (wit bindings and a link hook), see
@@ -115,7 +115,7 @@ timezone host call either, so the name always reports `UTC` and the offset a con
 
 ### The timezone host attempt
 
-Serving `wasi:clocks/timezone@0.3.0` from this repo's Rust runner (`pkg/test_runner`),
+Serving `wasi:clocks/timezone@0.3.0` from this repo's Rust runner (`pkg/tina_wasm_host`),
 next to the existing custom instances for `wasm:dart/trace@1.0.0` and
 `wasm:dart/timeline@1.0.0`, was tried and reverted: the runner registered `iana-id` and
 `utc-offset`, with the zone taken from `TZ` or the system zone and the rules read from
