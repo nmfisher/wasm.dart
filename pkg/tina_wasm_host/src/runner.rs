@@ -193,6 +193,12 @@ pub struct GuestFlags {
     pub plugin_watch: bool,
     pub plugin_call_timeout_ms: Option<u64>,
     pub capabilities: Option<String>,
+    /// The layout-strategy plugin artifact (`--layout-plugin=path`): the
+    /// TUI's layout bridge routes solves to it; absent -> the guest's
+    /// compiled-in solver (docs/layout-plugin.md in the tina repo).
+    pub layout_plugin: Option<std::path::PathBuf>,
+    pub layout_plugin_watch: bool,
+    pub layout_plugin_deadline_ms: Option<u64>,
 }
 
 /// Parses the shared session flags. `--engine=` and positional paths are
@@ -226,6 +232,25 @@ pub fn parse_flags(args: impl Iterator<Item = String>) -> Result<GuestFlags> {
             flags.plugin_read_context = true;
         } else if arg == "--plugin-watch" {
             flags.plugin_watch = true;
+        } else if let Some(path) = arg.strip_prefix("--layout-plugin=") {
+            wasmtime::ensure!(
+                flags.layout_plugin.is_none(),
+                "only one layout plugin artifact is supported"
+            );
+            flags.layout_plugin = Some(path.into());
+        } else if arg == "--layout-plugin-watch" {
+            flags.layout_plugin_watch = true;
+        } else if let Some(spec) = arg.strip_prefix("--layout-plugin-deadline-ms=") {
+            let value: u64 = spec.parse().map_err(|_| {
+                wasmtime::Error::msg(format!(
+                    "--layout-plugin-deadline-ms expects u64, got {spec}"
+                ))
+            })?;
+            wasmtime::ensure!(
+                value > 0,
+                "--layout-plugin-deadline-ms must be positive"
+            );
+            flags.layout_plugin_deadline_ms = Some(value);
         } else if let Some(spec) = arg.strip_prefix("--plugin-call-timeout-ms=") {
             let value: u64 = spec.parse().map_err(|_| {
                 wasmtime::Error::msg(format!(
@@ -267,6 +292,7 @@ pub(crate) struct Prepared {
     /// (the host owns the byte stream). None with `--no-stdin`.
     pub stdin_tx: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
     pub plugin_runtime: Option<std::sync::Arc<tina_plugin::TinaPluginRuntime>>,
+    pub layout_runtime: Option<std::sync::Arc<crate::tina_layout::LayoutPluginRuntime>>,
 }
 
 pub(crate) fn prepare(
@@ -491,6 +517,25 @@ pub(crate) fn prepare(
         None
     };
 
+    // The layout-strategy plugin (`--layout-plugin=path`): zero
+    // capabilities by admission; deadlines default to the tight layout
+    // budget (see tina_layout). `--layout-plugin-watch` re-reads the
+    // artifact per call - the live strategy-swap dev loop.
+    let layout_runtime = flags.layout_plugin.as_ref().map(|path| {
+        let deadline = flags
+            .layout_plugin_deadline_ms
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(crate::tina_layout::DEFAULT_LAYOUT_CALL_DEADLINE);
+        let runtime = crate::tina_layout::LayoutPluginRuntime::from_artifact(
+            path,
+            flags.layout_plugin_watch,
+            crate::tina_layout::layout_limits(deadline),
+        )
+        .with_context(|| format!("Mounting layout plugin {}", path.display()))?;
+        Ok::<_, wasmtime::Error>(std::sync::Arc::new(runtime))
+    }).transpose()?;
+    boot_mark("host:layout-plugin");
+
     let preopens: Vec<(String, std::path::PathBuf)> = policy
         .preopens()
         .into_iter()
@@ -554,6 +599,7 @@ pub(crate) fn prepare(
         stdout,
         stdin_tx,
         plugin_runtime,
+        layout_runtime,
     })
 }
 
@@ -565,6 +611,7 @@ pub(crate) fn prepare(
 pub(crate) fn build_linker(
     engine: &wasmtime::Engine,
     plugin_runtime: &Option<std::sync::Arc<tina_plugin::TinaPluginRuntime>>,
+    layout_runtime: &Option<std::sync::Arc<crate::tina_layout::LayoutPluginRuntime>>,
 ) -> Result<Linker<HostState>> {
     let mut linker = Linker::new(engine);
     {
@@ -765,6 +812,83 @@ pub(crate) fn build_linker(
         })?;
     }
 
+    // The layout bridge (`tina:layout/bridge@1.0.0`): the TUI's solve
+    // calls land here and the host routes them to the mounted strategy
+    // plugin's own Store (components never call components). Absent,
+    // erroring or timed-out plugins surface as the fallback variants;
+    // the guest then uses its compiled-in solver.
+    {
+        let mut root = linker.root();
+        let mut bridge = root.instance(crate::tina_layout::LAYOUT_BRIDGE_INTERFACE)?;
+        let layout_bridge =
+            crate::tina_layout::LayoutBridge::new(layout_runtime.clone());
+        // Operator diagnostics: the first successful describe logs the
+        // mounted strategy once (the guest's own notice rides its stderr,
+        // which the runner does not forward to the host log).
+        let announced = std::sync::atomic::AtomicBool::new(false);
+        bridge.func_new("describe", move |_store, _ty, params, results| {
+            wasmtime::ensure!(
+                params.is_empty() && results.len() == 1,
+                "unexpected layout describe signature"
+            );
+            results[0] = match layout_bridge.describe() {
+                Some(descriptor) => {
+                    if !announced.load(std::sync::atomic::Ordering::Relaxed) {
+                        announced.store(true, std::sync::atomic::Ordering::Relaxed);
+                        eprintln!(
+                            "tina-wasm-host: layout strategy {} {} mounted",
+                            descriptor.id, descriptor.version
+                        );
+                    }
+                    Val::Option(Some(Box::new(Val::Record(vec![
+                        ("id".into(), Val::String(descriptor.id)),
+                        ("version".into(), Val::String(descriptor.version)),
+                        ("description".into(), Val::String(descriptor.description)),
+                    ]))))
+                }
+                None => Val::Option(None),
+            };
+            Ok(())
+        })?;
+        let layout_bridge =
+            crate::tina_layout::LayoutBridge::new(layout_runtime.clone());
+        let fell_back = std::sync::atomic::AtomicBool::new(false);
+        bridge.func_new("solve", move |_store, _ty, params, results| {
+            wasmtime::ensure!(
+                params.len() == 4 && results.len() == 1,
+                "unexpected layout solve signature"
+            );
+            let request = crate::tina_layout::parse_request(
+                &params[0], &params[1], &params[2], &params[3],
+            )
+            .map_err(|fallback| {
+                wasmtime::Error::msg(format!(
+                    "layout bridge could not parse the solve request: {fallback:?}"
+                ))
+            })?;
+            results[0] = match layout_bridge.solve(&request) {
+                Ok(solution) => {
+                    Val::Result(Ok(Some(Box::new(
+                        crate::tina_layout::LayoutBridge::solution_val(&solution),
+                    ))))
+                }
+                Err(fallback) => {
+                    if !fell_back.load(std::sync::atomic::Ordering::Relaxed) {
+                        fell_back.store(true, std::sync::atomic::Ordering::Relaxed);
+                        eprintln!(
+                            "tina-wasm-host: layout solve falling back to the \
+                             built-in solver: {fallback:?}"
+                        );
+                    }
+                    Val::Result(Err(Some(Box::new(
+                        crate::tina_layout::LayoutBridge::fallback_val(&fallback),
+                    ))))
+                }
+            };
+            Ok(())
+        })?;
+    }
+
     Ok(linker)
 }
 
@@ -783,6 +907,7 @@ pub async fn run_guest(
         stdout,
         stdin_tx: _,
         plugin_runtime,
+        layout_runtime,
     } = prepare(&component_bytes, precompiled, &flags, false, false)?;
     let Some(run_instance_index) = component.get_export_index(None, "wasmdart:tests/tested-module")
     else {
@@ -799,7 +924,7 @@ pub async fn run_guest(
     };
 
 
-    let linker = build_linker(&engine, &plugin_runtime)?;
+    let linker = build_linker(&engine, &plugin_runtime, &layout_runtime)?;
     boot_mark("host:linker-build");
     let instance = linker.instantiate_async(&mut store, &component).await?;
     boot_mark("host:instantiate");

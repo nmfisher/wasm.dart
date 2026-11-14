@@ -8,6 +8,7 @@ pub mod plugin_loader;
 pub mod policy;
 pub mod runner;
 pub mod tina_http;
+pub mod tina_layout;
 pub mod tina_policy;
 pub mod tina_plugin;
 pub mod tina_process;

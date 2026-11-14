@@ -86,6 +86,7 @@ pub async fn run_bytes(
         stdout,
         stdin_tx,
         plugin_runtime,
+        layout_runtime,
     } = crate::runner::prepare(&component_bytes, precompiled, &flags, true, true)?;
     crate::runner::boot_mark("tui:prepare-done");
 
@@ -109,7 +110,7 @@ pub async fn run_bytes(
         engine
     };
 
-    let mut linker = crate::runner::build_linker(&tick_engine, &plugin_runtime)?;
+    let mut linker = crate::runner::build_linker(&tick_engine, &plugin_runtime, &layout_runtime)?;
     // The tty authority + the crash channel (tina:term): components that
     // do not import tina:term never reach it.
     crate::tina_term::add_to_linker(&mut linker)?;

@@ -822,6 +822,36 @@ if ({is_err}.toBool()) {{
                 }
                 uwriteln!(self.definition, "}}");
             }
+            Instruction::GuestDeallocateList { element } => {
+                // Walk the received list, freeing each element's owned
+                // payloads (strings, nested lists), then the array itself.
+                // The element body addresses the record through the
+                // `elementPtr` name produced by IterBasePointer.
+                self.options.uses_memory = true;
+                let length = operands.pop().unwrap();
+                let ptr = operands.pop().unwrap();
+                let FinishedBlock {
+                    code,
+                    cleanup,
+                    operands: _,
+                } = self.blocks.pop().unwrap();
+                let size = self.size_align.size(element).size_wasm32();
+                let align = self.size_align.align(element).align_wasm32();
+                let dart = self.dart.import(KnownDartUri::DartWasm);
+                let rt_import = self.dart.import(KnownDartUri::PkgWasmComponents);
+                let base = self.temporary_variable();
+                let index = self.temporary_variable();
+                uwriteln!(
+                    self.definition,
+                    "
+final {base} = {ptr}.toIntUnsigned();
+for (var {index} = 0; {index} < {length}.toIntUnsigned(); {index}++) {{
+  final elementPtr = {dart}.WasmI32.fromInt({base} + {index} * {size});
+  {code}{cleanup}}}
+{rt_import}.dartFree({ptr}, {dart}.WasmI32.fromInt({length}.toIntUnsigned() * {size}), const {dart}.WasmI32({align}));
+"
+                );
+            }
             Instruction::StreamLower { payload: _, ty } => {
                 let vtable = self.dart.stream_future_vtables.get(ty).cloned().unwrap();
                 let tmp = self.temporary_variable();
@@ -883,6 +913,16 @@ if ({is_err}.toBool()) {{
             Instruction::I32Store8 { offset } => self.mem_store(operands, "storeInt8", offset),
             Instruction::I32Store16 { offset } => self.mem_store(operands, "storeInt16", offset),
             Instruction::I64Store { offset } => self.mem_store(operands, "storeInt64", offset),
+            // Records spilled to linear memory (more fields than the flat
+            // ABI allows) address f32/f64 members through these; the
+            // dart:_wasm Memory has the float accessors, they were just
+            // never wired into the generated lowering.
+            Instruction::F32Store { offset } => {
+                self.mem_store(operands, "storeFloat32", offset)
+            }
+            Instruction::F64Store { offset } => {
+                self.mem_store(operands, "storeFloat64", offset)
+            }
             Instruction::I32Load { offset }
             | Instruction::LengthLoad { offset }
             | Instruction::PointerLoad { offset } => {
@@ -902,6 +942,12 @@ if ({is_err}.toBool()) {{
             }
             Instruction::I64Load { offset } => {
                 self.mem_load(operands, results, "loadInt64", offset)
+            }
+            Instruction::F32Load { offset } => {
+                self.mem_load(operands, results, "loadFloat32", offset)
+            }
+            Instruction::F64Load { offset } => {
+                self.mem_load(operands, results, "loadFloat64", offset)
             }
             Instruction::I32FromBool => {
                 results.push(Rc::new(format!(

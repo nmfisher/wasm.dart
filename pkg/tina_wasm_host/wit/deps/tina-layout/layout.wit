@@ -1,0 +1,137 @@
+package tina:layout@1.0.0;
+
+/// The layout contract vocabulary: tina_layout's GridSpec and solution
+/// types as structured records (see tina docs/layout-plugin.md). The
+/// record shapes are the single serialization - the same field names
+/// serve the Dart codec (LayoutWire), the guest bindings and the host's
+/// Val records. Plugins never change what a rectangle is.
+interface types {
+  enum track-kind {
+    fixed,
+    weighted,
+    auto,
+  }
+
+  record track {
+    kind: track-kind,
+    size-units: f64,
+    weight: f64,
+    min-units: f64,
+    /// `none` = unbounded (the GridTrack default).
+    max-units: option<f64>,
+  }
+
+  /// Placement along one axis: an explicit track index, or auto-flow
+  /// (`start` = none) with a span count.
+  record span {
+    start: option<u32>,
+    span: u32,
+  }
+
+  record layout-item {
+    id: string,
+    column: span,
+    row: span,
+    min-width-units: f64,
+    min-height-units: f64,
+    max-width-units: option<f64>,
+    max-height-units: option<f64>,
+    aspect-hint: option<f64>,
+    priority: s32,
+  }
+
+  record layout-spec {
+    columns: list<track>,
+    rows: list<track>,
+    items: list<layout-item>,
+  }
+
+  record cell-metrics {
+    rows-per-unit: f64,
+  }
+
+  /// A rectangle in terminal cells. Never negative, never outside the
+  /// terminal the solve was for.
+  record cell-rect {
+    col: s32,
+    row: s32,
+    width: s32,
+    height: s32,
+  }
+
+  record rect-entry {
+    id: string,
+    rect: cell-rect,
+  }
+
+  record layout-drop {
+    id: string,
+    reason: string,
+  }
+
+  record layout-solution {
+    columns: u32,
+    rows: u32,
+    metrics: cell-metrics,
+    rects: list<rect-entry>,
+    column-track-sizes: list<f64>,
+    row-track-sizes: list<f64>,
+    dropped: list<layout-drop>,
+    overflow-units-x: f64,
+    overflow-units-y: f64,
+    trailing-gap-units-x: f64,
+    trailing-gap-units-y: f64,
+  }
+
+  /// Identity card of a layout strategy; shared by the strategy export
+  /// and the bridge import (living here so the bridge does not need the
+  /// strategy interface for its types).
+  record strategy-descriptor {
+    id: string,
+    /// The contract version this strategy speaks ("1.0.0").
+    version: string,
+    description: string,
+  }
+}
+
+/// What a layout strategy plugin exports. Pure function, zero
+/// capabilities: a strategy imports nothing beyond WASI and the contract's
+/// own types (the host admits nothing else).
+interface strategy {
+  use types.{cell-metrics, layout-solution, layout-spec, strategy-descriptor};
+
+  describe: func() -> strategy-descriptor;
+
+  /// Solve one spec for one terminal size. Synchronous; the host runs it
+  /// under an epoch deadline and falls back to the built-in solver on
+  /// any failure.
+  solve: func(spec: layout-spec, columns: u32, rows: u32, metrics: cell-metrics)
+    -> result<layout-solution, string>;
+}
+
+/// The host-mediated bridge the TUI imports. The host routes solve calls
+/// to the mounted strategy plugin's own Store; components never call
+/// components.
+interface bridge {
+  use types.{cell-metrics, layout-solution, layout-spec, strategy-descriptor};
+
+  variant fallback {
+    /// No layout plugin is mounted.
+    no-plugin,
+    /// The plugin trapped or returned an error.
+    plugin-error(string),
+    /// The per-call epoch deadline killed the plugin mid-solve.
+    plugin-timeout(string),
+  }
+
+  /// The mounted strategy, or none. Cheap enough to poll.
+  describe: func() -> option<strategy-descriptor>;
+
+  solve: func(spec: layout-spec, columns: u32, rows: u32, metrics: cell-metrics)
+    -> result<layout-solution, fallback>;
+}
+
+/// The world a layout strategy plugin compiles against.
+world layout-plugin {
+  export strategy;
+}
