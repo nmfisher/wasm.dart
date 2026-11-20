@@ -172,6 +172,9 @@ struct LivePlugin {
 pub struct LayoutPluginRuntime {
     engine: Engine,
     limits: PluginLimits,
+    /// The compiled-component cache (`--component-cache`), when the
+    /// launcher passed one: artifacts compile per fresh load otherwise.
+    cache: Mutex<Option<crate::component_cache::ComponentCache>>,
     /// The dev loop: re-read the artifact before each call so a rebuilt
     /// strategy takes effect on the next solve (hot swap).
     artifact: Option<std::path::PathBuf>,
@@ -203,6 +206,7 @@ impl LayoutPluginRuntime {
         let ticker = EpochTicker::spawn(&engine, limits.epoch_tick)?;
         Ok(Self {
             engine,
+            cache: Mutex::new(None),
             limits,
             artifact,
             bytes: Mutex::new(bytes),
@@ -268,6 +272,15 @@ impl LayoutPluginRuntime {
         }
     }
 
+    /// Arms the compiled-component cache (the runner wires the
+    /// `--component-cache` flag here after construction).
+    pub fn set_component_cache(&self, cache: crate::component_cache::ComponentCache) {
+        match self.cache.lock() {
+            Ok(mut slot) => *slot = Some(cache),
+            Err(poisoned) => *poisoned.into_inner() = Some(cache),
+        }
+    }
+
     /// Reload the artifact bytes now (watch mode reads before calls too).
     pub fn reload(&self) -> Result<(), LayoutFallback> {
         let Some(artifact) = &self.artifact else {
@@ -298,8 +311,22 @@ impl LayoutPluginRuntime {
             }
         }
         let bytes = self.bytes.lock().map_err(poisoned)?.clone();
-        let component = Component::new(&self.engine, &bytes)
-            .map_err(|e| LayoutFallback::PluginError(format!("compiling layout plugin: {e}")))?;
+        let cached = self
+            .cache
+            .lock()
+            .map_err(poisoned)?
+            .clone()
+            .map(|cache| cache.load(&self.engine, &bytes, "layout "));
+        let component = match cached {
+            Some(Ok(component)) => component,
+            // A cache failure degrades to today's compile, exactly like
+            // the runner-side cache; a plugin compile failure stays a
+            // plugin error (the fallback solver serves the layout).
+            Some(Err(e)) => Component::new(&self.engine, &bytes)
+                .map_err(|_| LayoutFallback::PluginError(format!("layout cache miss: {e}")))?,
+            None => Component::new(&self.engine, &bytes)
+                .map_err(|e| LayoutFallback::PluginError(format!("compiling layout plugin: {e}")))?,
+        };
         admit(&self.engine, &component)?;
         let mut linker: Linker<LayoutPluginStore> = Linker::new(&self.engine);
         wasmtime_wasi::p3::add_to_linker::<LayoutPluginStore>(&mut linker)

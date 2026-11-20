@@ -4,6 +4,7 @@
 //! `tina-case-runner` (one positional component under the
 //! `wasmdart:tests` case protocol).
 pub mod compile_profile;
+pub mod component_cache;
 pub mod plugin_loader;
 pub mod policy;
 pub mod runner;

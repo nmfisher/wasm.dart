@@ -26,6 +26,8 @@ reqwest = { version = "0.12", default-features = false, features = [
 futures = "0.3"
 bytes = "1"
 libc = "0.2"
+# Component-cache keys: sha256(artifact bytes || wasmtime-version salt).
+sha2 = "0.10"
 
 # The build script precompiles the embedded components with the SAME
 # wasmtime the runtime embeds (one version via the lock), so the
@@ -41,3 +43,7 @@ path = "src/main.rs"
 [[bin]]
 name = "tina-case-runner"
 path = "src/bin/case_runner.rs"
+
+[dev-dependencies]
+# Cache-path tests: hit/miss/rewrite against a throwaway directory.
+tempfile = "3"
