@@ -193,6 +193,12 @@ pub struct GuestFlags {
     pub plugin_watch: bool,
     pub plugin_call_timeout_ms: Option<u64>,
     pub capabilities: Option<String>,
+    /// The compiled-component cache directory (`--component-cache=dir`):
+    /// serialized compiled images of the runtime-loaded components (the
+    /// Tina plugin and the layout plugin), keyed by the artifact bytes'
+    /// hash. None (flag absent) compiles on every load, as before.
+    pub component_cache: Option<std::path::PathBuf>,
+
     /// The layout-strategy plugin artifact (`--layout-plugin=path`): the
     /// TUI's layout bridge routes solves to it; absent -> the guest's
     /// compiled-in solver (docs/layout-plugin.md in the tina repo).
@@ -216,6 +222,16 @@ pub fn parse_flags(args: impl Iterator<Item = String>) -> Result<GuestFlags> {
             flags.preopens.push((guest.to_string(), host.into()));
         } else if arg == "--no-stdin" {
             flags.no_stdin = true;
+        } else if let Some(dir) = arg.strip_prefix("--component-cache=") {
+            wasmtime::ensure!(
+                flags.component_cache.is_none(),
+                "--component-cache given more than once"
+            );
+            wasmtime::ensure!(
+                !dir.is_empty(),
+                "--component-cache expects a directory path"
+            );
+            flags.component_cache = Some(dir.into());
         } else if let Some(spec) = arg.strip_prefix("--capabilities=") {
             wasmtime::ensure!(
                 flags.capabilities.is_none(),
@@ -512,6 +528,11 @@ pub(crate) fn prepare(
                 limits,
             )?
         };
+        // The compiled-component cache (`--component-cache`): the
+        // plugin artifact compiles on every open without it.
+        if let Some(dir) = &flags.component_cache {
+            runtime.set_component_cache(crate::component_cache::ComponentCache::new(dir));
+        }
         Some(Arc::new(runtime))
     } else {
         None
@@ -532,6 +553,11 @@ pub(crate) fn prepare(
             crate::tina_layout::layout_limits(deadline),
         )
         .with_context(|| format!("Mounting layout plugin {}", path.display()))?;
+        // The compiled-component cache (`--component-cache`): the
+        // layout artifact compiles on every fresh load without it.
+        if let Some(dir) = &flags.component_cache {
+            runtime.set_component_cache(crate::component_cache::ComponentCache::new(dir));
+        }
         Ok::<_, wasmtime::Error>(std::sync::Arc::new(runtime))
     }).transpose()?;
     boot_mark("host:layout-plugin");
@@ -565,12 +591,19 @@ pub(crate) fn prepare(
         // serialization version + compile-settings hash before any code
         // is used (`serialization::check_compatible`), so a mismatched
         // artifact errors here instead of executing.
+        // The boot-timing line (commit-29 vocabulary, surfaced by the
+        // launcher as the session's startup notice): the embedded
+        // component either deserializes from its build-time precompiled
+        // twin or compiles from the embedded bytes.
+        let embedded_boot = std::time::Instant::now();
+        let mut boot_deserialized = false;
         let component = match precompiled {
             Some(artifact) if !artifact.is_empty() => {
                 boot_mark("host:deserialize-start");
                 match unsafe { Component::deserialize(&engine, artifact) } {
                     Ok(component) => {
                         boot_mark("host:component-deserialize");
+                        boot_deserialized = true;
                         component
                     }
                     Err(error) => {
@@ -592,6 +625,10 @@ pub(crate) fn prepare(
                 component
             }
         };
+        crate::component_cache::report_embedded_boot(
+            boot_deserialized,
+            embedded_boot.elapsed(),
+        );
     Ok(Prepared {
         engine,
         store,

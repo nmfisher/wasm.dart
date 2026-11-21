@@ -151,6 +151,16 @@ impl TinaPluginRuntime {
         })
     }
 
+    /// Arms the compiled-component cache (the runner wires the
+    /// `--component-cache` flag here after construction): the artifact
+    /// compiles on every open otherwise.
+    pub fn set_component_cache(&self, cache: crate::component_cache::ComponentCache) {
+        match self.boundary.lock() {
+            Ok(mut boundary) => boundary.set_component_cache(cache),
+            Err(poisoned) => poisoned.into_inner().set_component_cache(cache),
+        }
+    }
+
     /// Like `with_limits`, but the component file is re-read on every `open`
     /// (compile-on-load dev loop; see the type doc).
     pub fn watching_artifact(

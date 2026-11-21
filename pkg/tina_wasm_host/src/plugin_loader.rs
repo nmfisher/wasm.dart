@@ -272,6 +272,9 @@ struct ActivePlugin {
 /// slot and checked generation; Wasmtime functions/resources never escape.
 pub struct PluginBoundary {
     engine: Engine,
+    /// The compiled-component cache (`--component-cache`), when the
+    /// launcher passed one: artifacts compile per `load` otherwise.
+    cache: Option<std::sync::Mutex<Option<crate::component_cache::ComponentCache>>>,
     broker: std::sync::Arc<dyn PluginServiceBroker>,
     loader_id: u64,
     next_slot: u64,
@@ -302,6 +305,7 @@ impl PluginBoundary {
             .map_err(|_| wasmtime::Error::msg("plugin loader identity exhausted"))?;
         Ok(Self {
             engine,
+            cache: None,
             broker,
             loader_id,
             next_slot: 1,
@@ -313,10 +317,29 @@ impl PluginBoundary {
         })
     }
 
+    /// Arms the compiled-component cache (the runner wires the
+    /// `--component-cache` flag here after construction).
+    pub fn set_component_cache(&mut self, cache: crate::component_cache::ComponentCache) {
+        self.cache = Some(std::sync::Mutex::new(Some(cache)));
+    }
+
+    fn cached(&self) -> Option<crate::component_cache::ComponentCache> {
+        self.cache
+            .as_ref()
+            .and_then(|slot| slot.lock().ok())
+            .and_then(|guard| guard.clone())
+    }
+
     pub fn load(&mut self, bytes: &[u8], policy: PluginPolicy) -> Result<PluginId> {
         verify_embedder_abi(bytes)?;
-        let component =
-            Component::new(&self.engine, bytes).context("compiling plugin component")?;
+        let component = match self.cached() {
+            Some(cache) => cache
+                .load(&self.engine, bytes, "plugin ")
+                .context("compiling plugin component")?,
+            None => {
+                Component::new(&self.engine, bytes).context("compiling plugin component")?
+            }
+        };
         validate_probe_component(&self.engine, &component, policy)?;
         let reuse_slot = self.free_slots.last().copied();
         let slot = reuse_slot.unwrap_or(self.next_slot);
