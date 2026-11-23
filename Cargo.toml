@@ -1,7 +1,6 @@
 [workspace]
 
 members = [
-    "pkg/tina_wasm_host",
     "pkg/runtime_helpers",
     "pkg/wit_bindgen_dart",
 ]
